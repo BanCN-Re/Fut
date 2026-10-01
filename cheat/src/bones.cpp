@@ -1,4 +1,4 @@
-﻿// D:\Work\Fut\cheat\src\bones.cpp
+// D:\Work\Fut\cheat\src\bones.cpp
 #include "bones.h"
 #include "ue.h"
 #include "offsets.h"
@@ -273,12 +273,15 @@ static bool GetImpl(uintptr_t character, BoneSet& out) {
     // 0x30 per transform; cap the read so a bogus count cannot ask for GBs.
     const int count = num;
     const size_t bytes = (size_t)count * 0x30;
-    if (bytes > 0x10000) { static int c4=0; if(c4++<3) LOG(SBOX("[bones] Get: count too big %d",0xB8), count); return false; }
+    // Ceiling matches ue::Read's own limit (0x20000). The two used to disagree:
+    // this check allowed 0x10000 while Read() refused anything over 0x1000, so a
+    // 308-bone array (14,784 bytes) passed here and was rejected there -- and the
+    // skeleton silently never resolved.
+    if (bytes > 0x20000) { static int c4=0; if(c4++<3) LOG(SBOX("[bones] Get: count too big %d",0xB8), count); return false; }
 
-    static thread_local uint8_t buf[0x10000];
+    static thread_local uint8_t buf[0x20000];
     if (!ue::Read(data, buf, bytes)) { static int c5=0; if(c5++<3) LOG(SBOX("[bones] Get: read failed (%d bytes)",0xB9), (int)bytes); return false; }
 
-// D:\Work\Fut\cheat\src\_bones_body.txt
     // -----------------------------------------------------------------------
     // BONE SELECTION -- RESTRICTED TO THE BODY.
     //
@@ -481,8 +484,8 @@ void DumpBones(uintptr_t character) {
         q[0], q[1], q[2], q[3], t[0], t[1], t[2]);
 
     const size_t bytes = (size_t)num * 0x30;
-    if (bytes > 0x10000) { LOG("[bones] array too large (%zu)", bytes); return; }
-    static uint8_t buf[0x10000];
+    if (bytes > 0x20000) { LOG("[bones] array too large (%zu)", bytes); return; }
+    static uint8_t buf[0x20000];
     if (!ue::Read(data, buf, bytes)) { LOG("[bones] read failed"); return; }
 
     float minZ = 1e30f, maxZ = -1e30f;

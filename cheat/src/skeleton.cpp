@@ -1,4 +1,4 @@
-﻿// D:\Work\Fut\cheat\src\skeleton.cpp
+// D:\Work\Fut\cheat\src\skeleton.cpp
 // See skeleton.h for why the joints are resolved by name.
 #include "skeleton.h"
 #include "ue.h"
@@ -15,33 +15,25 @@
 namespace skeleton {
 
 // ---------------------------------------------------------------------------
-// GetBoneName
+// WHY GetBoneName IS NOT USED (kept as a note so nobody re-adds it)
 //
-// USkinnedMeshComponent::GetBoneName(int32) -> FName   (RVA 0x44F42A0)
+// The obvious way to read bone names is
+//     USkinnedMeshComponent::GetBoneName(int32) -> FName    RVA 0x44F42A0
+// and it was tried two ways:
 //
-// FName is (ComparisonIndex:int32, Number:int32) in this build; to turn it into
-// text we go through the same AppendString path ue::NameOf uses. Doing that per
-// bone per frame would be far too slow, which is why Resolve() runs once per
-// mesh and stores indices.
+//   1. modelled as (self, outFName, index)  -- WRONG. FName is 8 bytes and comes
+//      back in RAX, so the callee read RCX as a hidden sret slot and every name
+//      resolved empty.
+//   2. modelled as (self, index) -> uint64   -- ABI-correct, but the call still
+//      faults inside the engine on this build (the BP wrapper expects a
+//      UFunction invocation, not a bare C++ call).
+//
+// Both were dead ends, and a third path works and is used instead: the mesh's
+// USkeletalMesh (mesh + 0x4D0) carries RawRefBoneInfo, a TArray<FMeshBoneInfo>
+// where each entry's first 4 bytes are the FName ComparisonIndex. That array is
+// read directly and the index is resolved with ue::NameFromIndex -- no engine
+// call at all, so it cannot fault and costs a single cached walk per mesh.
 // ---------------------------------------------------------------------------
-// ---------------------------------------------------------------------------
-// ABI FIX -- GetBoneName returns an 8-byte FName BY VALUE, which on x64 Windows
-// comes back in RAX, not through a hidden sret pointer. The previous signature
-// modelled it as (self, outFName, index), so RCX carried a garbage "sret" slot,
-// RDX carried the mesh and R8 the index -- the callee read garbage arguments and
-// the real FName in RAX was discarded. Every RawFName stayed zeroed and every
-// bone name resolved empty ("first bone=''"), so 0 joints ever matched and the
-// skeleton degraded to the 4-point stick.
-// ---------------------------------------------------------------------------
-typedef uint64_t(__fastcall* tGetBoneName)(void* self, int32_t index);
-
-static tGetBoneName s_getBoneName = nullptr;
-
-static void* GetBoneNameFn() {
-    if (!s_getBoneName)
-        s_getBoneName = reinterpret_cast<tGetBoneName>(ue::ImageBase() + 0x44F42A0);
-    return reinterpret_cast<void*>(s_getBoneName);
-}
 
 // Names to look for, in priority order per joint. Matching is case-insensitive
 // substring; the first hit wins.
@@ -85,26 +77,6 @@ static bool Matches(const std::string& lowered, const char* const* pats) {
     for (int i = 0; i < 4 && pats[i]; ++i)
         if (lowered.find(pats[i]) != std::string::npos) return true;
     return false;
-}
-
-// ---------------------------------------------------------------------------
-// GetBoneName call, isolated.
-//
-// MSVC forbids __try in a function that also needs C++ unwinding (C2712), and
-// Resolve() holds std::string. Keeping the SEH block in a leaf function that owns
-// nothing is the standard fix -- the same one used in canvas.cpp.
-// ---------------------------------------------------------------------------
-struct RawFName { int32_t ComparisonIndex; int32_t Number; };
-
-static bool SafeGetBoneName(void* fn, void* mesh, int32_t index, RawFName& out) {
-    __try {
-        const uint64_t v = reinterpret_cast<tGetBoneName>(fn)(mesh, index);
-        out.ComparisonIndex = static_cast<int32_t>(v & 0xFFFFFFFFu);
-        out.Number          = static_cast<int32_t>(v >> 32);
-        return true;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return false;
-    }
 }
 
 // Cache: one rig per mesh component. Meshes are stable for a character's life.
@@ -184,45 +156,7 @@ bool Resolve(uintptr_t mesh, Rig& out) {
     if (!nameArr) {
         LOG(SBOX("[skel] no refskeleton array on mesh 0x%llX (skm=0x%llX num=%d)", 0x1A3),
             (unsigned long long)mesh, (unsigned long long)skm, num);
-        // ------------------------------------------------------------------
-    // ONE-SHOT NAME CENSUS.
-    //
-    // The rig on this title starts with "Root", which matches none of the Biped
-    // ("Bip001-*") or Mannequin ("*_l") patterns in kNames -- hence only 5 joints
-    // ever matched. Guessing more patterns would be blind work; instead the first
-    // few resolved meshes print the first 40 bone names verbatim, so the real
-    // convention can be read off and the table corrected from evidence.
-    // ------------------------------------------------------------------
-    {
-        static int s_censusLeft = 2;
-        if (s_censusLeft > 0) {
-            --s_censusLeft;
-            LOG(SBOX("[skel] bone names on 0x%llX (%d total):", 0x1A1),
-                (unsigned long long)mesh, num);
-            int shown = 0, emptyName = 0, callFail = 0;
-            for (int32_t i = 0; i < num && shown < 40; ++i) {
-                RawFName fn{};
-                if (!SafeGetBoneName(GetBoneNameFn(), reinterpret_cast<void*>(mesh), i, fn)) {
-                    ++callFail;
-                    continue;
-                }
-                char tmp[128] = {0};
-                if (!ue::NameFromIndex(fn.ComparisonIndex, tmp, sizeof(tmp))) {
-                    ++emptyName;
-                    LOG(SBOX("[skel]   [%d] <no name> idx=%d num=%d", 0x1A3),
-                        i, fn.ComparisonIndex, fn.Number);
-                    ++shown;
-                    continue;
-                }
-                LOG(SBOX("[skel]   [%d] %s", 0x1A2), i, tmp);
-                ++shown;
-            }
-            LOG(SBOX("[skel] census end: shown=%d callFail=%d emptyName=%d", 0x1A4),
-                shown, callFail, emptyName);
-        }
-    }
-
-    if (s_rigCount < kMaxRigs) s_rigs[s_rigCount++] = out;
+        if (s_rigCount < kMaxRigs) s_rigs[s_rigCount++] = out;
         return false;
     }
 
@@ -263,40 +197,38 @@ bool Resolve(uintptr_t mesh, Rig& out) {
     out.usable = core && limb && matched >= 8;
 
     // ------------------------------------------------------------------
-    // ONE-SHOT NAME CENSUS.
+    // ONE-SHOT NAME CENSUS -- reads the refskeleton array, not GetBoneName.
     //
-    // The rig on this title starts with "Root", which matches none of the Biped
-    // ("Bip001-*") or Mannequin ("*_l") patterns in kNames -- hence only 5 joints
-    // ever matched. Guessing more patterns would be blind work; instead the first
-    // few resolved meshes print the first 40 bone names verbatim, so the real
-    // convention can be read off and the table corrected from evidence.
+    // The rig on this title starts with "Root" and matches none of the Biped
+    // ("Bip001-*") or Mannequin ("*_l") patterns in kNames, which is why only a
+    // handful of joints ever resolve and the skeleton degrades to a stick figure.
+    //
+    // Guessing more patterns would be blind work, so the first two resolved meshes
+    // dump their real bone names and the table is corrected from that evidence.
+    //
+    // IMPORTANT: this reads `nameArr`, the same FName array the matching loop
+    // above uses, because that is the path that WORKS. The earlier version called
+    // SafeGetBoneName/GetBoneName, which faults on this build, so the census
+    // printed nothing at all and the fix could never be derived.
     // ------------------------------------------------------------------
     {
         static int s_censusLeft = 2;
         if (s_censusLeft > 0) {
             --s_censusLeft;
-            LOG(SBOX("[skel] bone names on 0x%llX (%d total):", 0x1A1),
+            LOG(SBOX("[skel] bone names on mesh 0x%llX (%d total):", 0x1A1),
                 (unsigned long long)mesh, num);
-            int shown = 0, emptyName = 0, callFail = 0;
-            for (int32_t i = 0; i < num && shown < 40; ++i) {
-                RawFName fn{};
-                if (!SafeGetBoneName(GetBoneNameFn(), reinterpret_cast<void*>(mesh), i, fn)) {
-                    ++callFail;
-                    continue;
-                }
+            int shown = 0, emptyName = 0;
+            for (int32_t i = 0; i < num && shown < 48; ++i) {
+                const uint32_t idx = (uint32_t)ue::RI32(nameArr + (size_t)i * nameStride);
                 char tmp[128] = {0};
-                if (!ue::NameFromIndex(fn.ComparisonIndex, tmp, sizeof(tmp))) {
+                if (!ue::NameFromIndex(idx, tmp, sizeof(tmp))) {
                     ++emptyName;
-                    LOG(SBOX("[skel]   [%d] <no name> idx=%d num=%d", 0x1A3),
-                        i, fn.ComparisonIndex, fn.Number);
-                    ++shown;
                     continue;
                 }
                 LOG(SBOX("[skel]   [%d] %s", 0x1A2), i, tmp);
                 ++shown;
             }
-            LOG(SBOX("[skel] census end: shown=%d callFail=%d emptyName=%d", 0x1A4),
-                shown, callFail, emptyName);
+            LOG(SBOX("[skel] census end: shown=%d emptyName=%d", 0x1A4), shown, emptyName);
         }
     }
 

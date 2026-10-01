@@ -1,4 +1,4 @@
-﻿// D:\Work\Fut\cheat\src\esp.cpp
+// D:\Work\Fut\cheat\src\esp.cpp
 // ESP: enumerate ACyCharacterBase instances, project their world position to
 // screen with the game's own ProjectWorldLocationToScreen, and draw boxes /
 // health / distance through ImGui's foreground draw list.
@@ -126,6 +126,10 @@ struct FilterStats {
     int dead = 0;
 };
 static FilterStats s_filter;
+
+// Forward declaration: the definition lives with the other filter helpers
+// further down, but ReadEntity (which runs first) needs it.
+static bool IsAliveSafe(uintptr_t actor);
 
 // read one character's fields
 //
@@ -263,8 +267,10 @@ static void RefreshSlow(uintptr_t actor, Entity& e) {
                 }
             }
         }
-    }    if (!(r->hpMax > 0.0f)) {
-        // fallback: the character's own cached base values (verified offsets)
+    }
+
+    // tertiary: the character's own cached base values (verified offsets)
+    if (!(r->hpMax > 0.0f)) {
         const float bh = ue::RF32(actor + off::CY_BaseHealth);
         const float bm = ue::RF32(actor + off::CY_BaseHealthMax);
         if (bm > 0.0f && bm < 100000.0f && bh >= -1.0f && bh <= bm + 1.0f) {
@@ -284,22 +290,17 @@ static void RefreshSlow(uintptr_t actor, Entity& e) {
     // ACyCharacterBase::IsAlive(bool bIsInjuredAlive) is the game's own answer
     // (RVA 0x2378630, from the current dump). It does not depend on any float we
     // read, so a failed HP read can no longer resurrect a corpse.
+    //
+    // Uses the single shared IsAliveSafe() wrapper declared below rather than its
+    // own local typedef: two copies of the same guarded call had drifted, and only
+    // one of them was kept in sync when the offset moved.
     // ------------------------------------------------------------------
-    {
-        typedef bool(__fastcall* tIsAlive)(void* self, bool bIsInjuredAlive);
-        static tIsAlive s_isAlive = nullptr;
-        if (!s_isAlive)
-            s_isAlive = reinterpret_cast<tIsAlive>(ue::ImageBase() + 0x2378630);
-
-        bool alive = false;
-        __try {
-            alive = s_isAlive(reinterpret_cast<void*>(actor), true);
-        } __except (EXCEPTION_EXECUTE_HANDLER) {
-            // If the call faults, fall back to the HP reading rather than
-            // assuming alive (which would leave corpses on screen).
-            alive = (r->hpMax > 0.0f && r->hp > 0.0f);
-        }
-        r->alive = alive;
+    r->alive = IsAliveSafe(actor);
+    if (!r->alive && r->hpMax > 0.0f && r->hp > 0.0f) {
+        // The engine says dead but the attribute set says alive. Trust the
+        // attribute set only when it has real numbers -- this covers the window
+        // right after a respawn where IsAlive has not caught up yet.
+        r->alive = true;
     }
 
     // ------------------------------------------------------------------
@@ -471,15 +472,42 @@ static bool HasPlayerState(uintptr_t actor) {
     return ue::PtrOk(ue::R64(actor + off::AP_PlayerState));
 }
 
+// ---------------------------------------------------------------------------
 // Lobby / viewing-room actors are characters too, but they are not in the match.
-// Their class names carry these markers.
+// Their CLASS names carry these markers.
+//
+// COST NOTE -- this used to walk the whole SuperStruct chain with ClassChain(),
+// which calls NameOf() (and therefore the engine's AppendString) up to eight
+// times PER ACTOR, on every 250 ms rescan. With ~10 characters that is ~80 engine
+// string calls per scan for a filter that almost always answers "no".
+//
+// Only the actor's OWN class name is needed for these markers, so one NameOf()
+// call replaces the chain walk. The result is cached per class pointer: a level
+// has a handful of distinct classes and thousands of actors.
+// ---------------------------------------------------------------------------
 static bool IsLobbyActor(uintptr_t actor) {
-    std::string chain;
-    if (!ue::ClassChain(actor, chain)) return false;
-    static const char* kBad[] = { "Lobby", "Viewer", "Show", "Preview", "Display" };
-    for (const char* b : kBad)
-        if (chain.find(b) != std::string::npos) return true;
-    return false;
+    const uintptr_t cls = ue::R64(actor + off::UObj_Class);
+    if (!ue::PtrOk(cls)) return false;
+
+    struct Entry { uintptr_t cls; bool lobby; };
+    static Entry s_cache[64];
+    static int   s_cacheN = 0;
+
+    for (int i = 0; i < s_cacheN; ++i)
+        if (s_cache[i].cls == cls) return s_cache[i].lobby;
+
+    bool lobby = false;
+    {
+        std::string nm;
+        if (ue::NameOf(cls, nm)) {
+            static const char* kBad[] = { "Lobby", "Viewer", "Preview", "Display", "Show" };
+            for (const char* b : kBad)
+                if (nm.find(b) != std::string::npos) { lobby = true; break; }
+        }
+    }
+
+    if (s_cacheN < 64) s_cache[s_cacheN++] = Entry{ cls, lobby };
+    return lobby;
 }
 
 // ---------------------------------------------------------------------------
@@ -723,10 +751,22 @@ void Render() {
     // Holding the previous list for a short window removes the blink without
     // hiding a genuinely empty scene: if the list stays empty past the window the
     // boxes do disappear, as they should.
+    //
+    // WHY THE WINDOW IS 120 ms AND NOT 400 ms
+    //
+    // The held entities carry POSITIONS that are frozen at the moment of the copy,
+    // while the camera keeps moving. Projecting stale world positions through a
+    // live camera is exactly what makes a box "jump": for the duration of the hold
+    // the box slides against a scene it no longer matches, then snaps to the new
+    // value when a real read succeeds.
+    //
+    // The hold only has to cover a dropped frame or two (16-33 ms at 60 Hz). 120 ms
+    // is generous for that and short enough that the drift stays sub-pixel at
+    // normal movement speeds.
     // -----------------------------------------------------------------------
     static std::vector<Entity> s_holdEnts;
     static ULONGLONG           s_holdUntil = 0;
-    constexpr ULONGLONG        kEntityHoldMs = 400;
+    constexpr ULONGLONG        kEntityHoldMs = 120;
 
     if (ents.empty()) {
         if (!s_holdEnts.empty() && GetTickCount64() < s_holdUntil) {
@@ -983,6 +1023,26 @@ namespace {
 void DrawOneInGame(void* canvasObj, const Entity& e, const ue::Camera& cam,
                    uint8_t localTeam, float screenW, float screenH) {
     (void)canvasObj;
+
+    // -----------------------------------------------------------------------
+    // ALIVE GATE AT THE DRAW ENTRY.
+    //
+    // This is the fix for "dead players keep their box".
+    //
+    // The alive test already ran in ReadEntity, but two paths could still put a
+    // dead actor in front of this function:
+    //
+    //   1. the 400 ms entity hold (s_holdEnts) restores last frame's snapshot
+    //      verbatim when a scan comes back empty, so a player who dies during
+    //      that window is drawn from the stale copy;
+    //   2. the address cache keeps an actor for up to 250 ms after it fails
+    //      ReadEntity, and ReadEntity is where the alive test lives.
+    //
+    // Gating here means the decision is made at the moment of drawing, against
+    // the entity that is actually about to be drawn -- the only place where it
+    // cannot be bypassed by a cache.
+    // -----------------------------------------------------------------------
+    if (!e.alive) return;
 
     const float camDx = e.x - cam.locX, camDy = e.y - cam.locY, camDz = e.z - cam.locZ;
     const float worldDist = sqrtf(camDx * camDx + camDy * camDy + camDz * camDz);

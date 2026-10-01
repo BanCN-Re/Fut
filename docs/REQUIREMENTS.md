@@ -5,6 +5,84 @@
 
 ---
 
+## E. 第四轮全量扫描修复（2026-10-02 04:00–04:25，**已编译未部署**）
+
+> 触发：用户报告 7 个 bug + 一次新崩溃（nocamera 跳多即崩）。
+> 新核心 `zw_core.dll` = 4,265,984 B / sha `141CDADC818D49F9`，
+> 位于 `cheat/build/core/`。**游戏运行中未部署**。
+> 部署版本仍是 `B27304830DCFE011`（00:45:48）。
+
+### E1 崩溃：`EXCEPTION_ACCESS_VIOLATION 0xa9420000`（nocamera 跳多）★最高危
+- [x] **根因**：`GetStealthActors` 被每 200 ms 调用一次，传零值 TArray 让**引擎分配**
+      内存，再用 `GetProcAddress(exe, "?Free@FMemory@@SAXPEAX@Z")` 释放 ——
+      **该符号在 Shipping 构建里不存在** → 每次都泄漏一个引擎堆块，且这些块
+      留在 GC 引用表里 → GC 走到已回收内存 → 堆破坏 → 渲染线程野指针崩溃
+- [x] **判据**：IP 低 32 位 == 访问地址，且 IP 以 `0000` 结尾（指向模块头）
+- [x] **修法**：**完全停止调用该函数**。改为被动读子系统**已维护**的数组
+      （`UCachedWorldSubsystem::UnVisibleActors @0x0038`），零分配、零 GC 压力
+- [x] 子系统实例经 `GObjects` 找一次并缓存（3 秒重试），数组读取加
+      `Num <= Max` 不变量校验 + 上限 4096
+- [ ] 玩家复测：长时间观战 / 反复 nocamera 不再崩溃
+
+### E2 相机重扫风暴（同一崩溃的放大器）
+- [x] **根因**：陈旧 POV 触发重扫时 `s_povRetryMs = 0`（"无冷却立即重扫"），
+      而 `LocatePovOffset` 扫 `0x4000` 字节 / 每 4 字节一次浮点读 = **16,384 次读**
+- [x] **修法**：加 `kRescanCooldownMs = 250`，重扫必须等满冷却
+- [ ] 玩家复测：观战切人时帧率稳定
+
+### E3 骨骼读取静默失败 ★影响骨骼位置/数量
+- [x] **根因**：`ue::Read` 有 `size > 0x1000` 直接返回 false 的守卫，
+      而骨骼数组 308 × 0x30 = **14,784 字节** → 每次必失败（日志 `read failed (14784 bytes)`）
+- [x] **修法**：上限提到 `0x20000`；bones 侧缓冲同步到 `0x20000`；
+      慢路径改为**循环分块**拷贝（原版只拆一次 + 递归，跨 3 个以上区域会少读）
+- [ ] 玩家复测：骨骼数量正确、位置贴合
+
+### E4 死亡后框存留
+- [x] **根因**：存活检查只在 `ReadEntity` 里，而实体 hold 缓存（400 ms）会把
+      已死实体的**旧快照**原样恢复；地址缓存也会留 250 ms
+- [x] **修法**：在 `DrawOneInGame` 入口加**存活门禁**（`if (!e.alive) return;`），
+      在真正要画的那一刻判定，任何缓存都绕不过
+- [ ] 玩家复测：死亡立刻消失
+
+### E5 框乱跳
+- [x] **根因**：hold 缓存持的是**冻结坐标**，而相机仍在动 → 陈旧世界坐标
+      经实时相机投影 = 框在滑动，恢复后突跳
+- [x] **修法**：hold 窗口 400 ms → **120 ms**（只需覆盖丢 1-2 帧）
+- [ ] 玩家复测：不再跳
+
+### E6 IsAlive 双份实现漂移
+- [x] **根因**：`esp.cpp` 里有两份 IsAlive 调用（289 行局部 typedef + 455 行
+      `IsAliveSafe`），偏移改动时只有一份被同步
+- [x] **修法**：合并为单一 `IsAliveSafe` + 前置声明；保留"引擎说死但属性集有
+      真实血量则判活"的重生窗口兜底
+- [ ] 玩家复测：重生瞬间框不闪
+
+### E7 `IsLobbyActor` 每帧重走类链
+- [x] **根因**：对**每个** actor 调 `ClassChain()`（内部 `NameOf` → 引擎
+      `AppendString` 最多 8 次），每次 250 ms 重扫都跑一遍
+- [x] **修法**：只用 actor 自身类名（1 次 `NameOf`）+ **按类指针缓存**结果
+- [ ] 玩家复测：扫描开销下降
+
+### E8 反隐身函数选错实现
+- [x] **根因**：`GetStealthActors` 有两个实现，我们用了
+      `UCyCachedWorldSubsystem`（通用）而非 `UPMCachedWorldSubsystem`（本游戏专用）
+- [x] **修法**：被动读取方案彻底绕开该选择（不再调用）
+
+### E9 代码卫生
+- [x] `skeleton.cpp` census 代码**重复两份**，且有用的那份落在 `return false`
+      之后的**不可达分支**里 → 重组，census 改用能工作的 refskeleton 数组
+- [x] 删除失效的 `SafeGetBoneName` / `RawFName` / `tGetBoneName`（两种 ABI 都异常）
+- [x] `bones.cpp` 里遗留的 `// D:\Work\Fut\cheat\src\_bones_body.txt` 替换残迹
+- [x] `esp.cpp` HP 段 `}` 与 `if` 粘连的格式问题
+
+### 未完成（沿用）
+- [ ] 后坐力消除（缺 `FCyRecoilProcessor` 字段偏移）
+- [ ] 墙后/墙前分色
+- [ ] 技能冷却监控（`docs/skill-functions.md` 74 条）
+- [ ] 骨骼命名表按实际骨架校正（census 现在能打印真实骨名了，待跑一次取名单）
+
+---
+
 ## A. 当前未完成（本轮必须修）
 
 > **接手会话 2026-10-01 20:54 状态**：A1–A5 代码全部落盘，已随

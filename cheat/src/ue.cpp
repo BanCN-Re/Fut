@@ -33,24 +33,58 @@ static __declspec(noinline) bool RawCopy(void* dst, const void* src, size_t n) {
 
 bool Read(uintptr_t addr, void* out, size_t size) {
     if (addr < 0x10000 || !out || size == 0) return false;
-    if (size > 0x1000) return false;              // guard against absurd sizes
+    // -----------------------------------------------------------------------
+    // SIZE LIMIT -- 0x1000 WAS TOO SMALL AND SILENTLY BROKE THE SKELETON.
+    //
+    // This guard was written for scalar reads (4/8 bytes) and set to one page.
+    // Bones::Get then asks for the whole bone array in one call:
+    //
+    //     308 bones x 0x30 (FTransform) = 14,784 bytes
+    //
+    // 14,784 > 0x1000, so Read() returned false immediately -- no fault, no
+    // exception, just "read failed (14784 bytes)" and a failed bone probe. The
+    // caller's own ceiling was 0x10000 and passed, so the two limits disagreed and
+    // the tighter one won silently.
+    //
+    // The limit now matches the largest legitimate request (0x20000 = 128 KB, big
+    // enough for any bone array at 512 bones); the recursion below still splits
+    // across region boundaries, so a large read cannot cross into an unmapped page
+    // without being validated first.
+    // -----------------------------------------------------------------------
+    if (size > 0x20000) return false;             // guard against absurd sizes
     if (RawCopy(out, reinterpret_cast<const void*>(addr), size)) return true;
 
-    // Slow path: the direct copy faulted. Confirm the page really is unusable
-    // so a genuine gap is reported as failure rather than looping.
-    MEMORY_BASIC_INFORMATION mbi;
-    if (VirtualQuery(reinterpret_cast<LPCVOID>(addr), &mbi, sizeof(mbi)) != sizeof(mbi))
-        return false;
-    if (mbi.State != MEM_COMMIT) return false;
-    if (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) return false;
+    // Slow path: the direct copy faulted. Copy it in region-sized pieces, checking
+    // each region before touching it.
+    //
+    // The previous version split ONCE and recursed, which under-reads whenever the
+    // request spans three or more regions (a 14 KB bone array can straddle several
+    // 4 KB pages). Copying in a loop until `size` is satisfied is both simpler and
+    // correct for any length.
+    size_t done = 0;
+    while (done < size) {
+        const uintptr_t cur = addr + done;
+        size_t remaining = size - done;
 
-    uintptr_t regionEnd = reinterpret_cast<uintptr_t>(mbi.BaseAddress) + mbi.RegionSize;
-    if (addr + size > regionEnd) {
-        size_t first = static_cast<size_t>(regionEnd - addr);
-        if (!RawCopy(out, reinterpret_cast<const void*>(addr), first)) return false;
-        return Read(regionEnd, reinterpret_cast<uint8_t*>(out) + first, size - first);
+        MEMORY_BASIC_INFORMATION mbi;
+        if (VirtualQuery(reinterpret_cast<LPCVOID>(cur), &mbi, sizeof(mbi)) != sizeof(mbi))
+            return false;
+        if (mbi.State != MEM_COMMIT) return false;
+        if (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) return false;
+
+        const uintptr_t regionEnd = reinterpret_cast<uintptr_t>(mbi.BaseAddress) + mbi.RegionSize;
+        if (cur >= regionEnd) return false;               // no forward progress
+
+        size_t chunk = static_cast<size_t>(regionEnd - cur);
+        if (chunk > remaining) chunk = remaining;
+
+        if (!RawCopy(reinterpret_cast<uint8_t*>(out) + done,
+                     reinterpret_cast<const void*>(cur), chunk))
+            return false;
+
+        done += chunk;
     }
-    return false;
+    return true;
 }
 
 uint64_t R64(uintptr_t a) { uint64_t v = 0; Read(a, &v, 8); return v; }
@@ -566,6 +600,10 @@ uintptr_t GetLocalPawn() {
 static int       s_povOff     = -1;      // offset from pcm to FMinimalViewInfo
 static ULONGLONG s_povRetryMs = 0;       // last failed scan attempt
 static const ULONGLONG kPovRetryMs = 1000;
+// Cooldown after a STALE-cache rescan (as opposed to a first-time locate).
+// See the note at the assignment: this must not be zero, or spectating turns the
+// 16k-read scan into a per-frame cost.
+static const ULONGLONG kRescanCooldownMs = 250;
 static Camera    s_holdCam{};
 static ULONGLONG s_holdMs     = 0;
 static const ULONGLONG kHoldMs = 400;
@@ -775,7 +813,26 @@ bool GetCamera(Camera& out) {
                         s_povOff, s_povFailStreak);
                     s_povOff = -1;
                     s_povFailStreak = 0;
-                    s_povRetryMs = 0;      // no cooldown: rescan immediately
+
+                    // ------------------------------------------------------------------
+                    // RATE-LIMIT THE RESCAN. DO NOT SET THIS TO 0.
+                    //
+                    // This used to be `s_povRetryMs = 0;` with the comment "no cooldown:
+                    // rescan immediately". That is exactly backwards while spectating: the
+                    // camera manager is swapped repeatedly, the cached offset goes stale
+                    // over and over, and LocatePovOffset -- which scans 0x4000 bytes in
+                    // 4-byte steps, i.e. 16,384 float reads into the same structure as the
+                    // renderer -- then runs back to back, every frame.
+                    //
+                    // The user's report ("nocamera 跳多了会崩溃") is that storm. Clearing the
+                    // cooldown removes the only thing bounding it, and the scan reads memory
+                    // the game is actively rewriting.
+                    //
+                    // So the rescan now waits a full retry interval. 250 ms is short enough
+                    // that a genuine camera change is recovered in a couple of frames, and
+                    // long enough that the scan cannot become the frame's dominant cost.
+                    // ------------------------------------------------------------------
+                    s_povRetryMs = GetTickCount64() - kPovRetryMs + kRescanCooldownMs;
                 }
             }
         }
