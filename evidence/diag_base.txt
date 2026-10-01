@@ -1,0 +1,17 @@
+﻿
+=== diag_base 2026-09-30 20:38:40 ===
+found pid=9076 ws=3013MB start=09/30/2026 20:29:04
+OpenProcess(0x410) handle=2492 err=0
+IsWow64 (32-bit under WOW64) = False
+EnumProcessModulesEx ok=False needed=0 err=5
+module count = 0
+
+--- modules of interest ---
+
+total modules enumerated: 0
+MAIN EXE not found in module list
+
+--- probe reads ---
+  hardcoded 0x140000000        @0x000140000000 FAIL err=5
+
+=== done ===

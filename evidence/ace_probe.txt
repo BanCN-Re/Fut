@@ -1,0 +1,5 @@
+=== ACE-Base64.dll analysis ===
+input: D:\Work\Fut\ida\ACE-Base64.dll
+imagebase: 0x180000000
+
+waiting for auto-analysis...

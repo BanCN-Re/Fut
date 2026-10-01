@@ -1,0 +1,4 @@
+=== live capture @ boot ===
+pid=16420
+dbg peb=0x39A000 r-peb-ok=0 head=0000 ldr=0x0 gle=5
+shipping base=0x0

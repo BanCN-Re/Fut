@@ -1,0 +1,8 @@
+// D:\Work\Fut\cheat\src\cheat.rc
+// Embeds the 黑体 font (same one UI1001 ships) so the menu renders Chinese
+// without depending on system fonts.
+// RCDATA is used (not a custom "TTF" type) because it is the form FindResource
+// reliably resolves.
+#include "resource.h"
+
+IDR_TTF1   RCDATA   "res\\heiti.ttf"

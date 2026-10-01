@@ -1,0 +1,21 @@
+﻿
+=== live offset validation 2026-09-30 20:38:09 ===
+game pid = 9076  ws = 2979 MB
+OpenProcess(VM_READ) OK
+module enum failed: 无法对 Null 数组进行索引。
+using assumed image base 0x140000000
+image base = 0x140000000
+
+--- GObjects @ base+0x72BE4B0 ---
+  READ FAILED at GObjects slot
+
+--- GWorld @ base+0x7420710 ---
+  READ FAILED
+
+--- GNames @ base+0x72A4F80 ---
+  READ FAILED
+
+--- ProcessEvent @ base+0x2A7D630 ---
+  READ FAILED
+
+=== done ===

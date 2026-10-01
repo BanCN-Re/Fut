@@ -1,0 +1,145 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{A1B2C3D4-E5F6-4A7B-8C9D-0E1F2A3B4C5D}</ProjectGuid>
+    <RootNamespace>futcheat</RootNamespace>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
+    <ConfigurationType>DynamicLibrary</ConfigurationType>
+    <PlatformToolset>v145</PlatformToolset>
+    <CharacterSet>MultiByte</CharacterSet>
+    <WholeProgramOptimization>false</WholeProgramOptimization>
+  </PropertyGroup>
+
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+
+  <PropertyGroup>
+    <OutDir>$(ProjectDir)..\build\core\</OutDir>
+    <IntDir>$(ProjectDir)..\build\obj\</IntDir>
+    <TargetName>zw_core</TargetName>
+    <!-- keep every symbol: the Nemesis audit found /OPT:REF silently dropped
+         whole units (the DNS blackhole among them) -->
+    <LinkIncremental>false</LinkIncremental>
+  </PropertyGroup>
+
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <ClCompile>
+      <WarningLevel>Level3</WarningLevel>
+      <Optimization>MaxSpeed</Optimization>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <PreprocessorDefinitions>NDEBUG;WIN32_LEAN_AND_MEAN;NOMINMAX;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+      <ConformanceMode>false</ConformanceMode>
+      <ExceptionHandling>Async</ExceptionHandling>
+      <!-- sources are UTF-8 with Chinese string literals; without /utf-8 MSVC
+           reads them as codepage 936 and mangles the literals -->
+      <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalIncludeDirectories>$(ProjectDir);$(ProjectDir)..\third_party\imgui;$(ProjectDir)..\third_party\minhook\include;D:\obf\Themida\ThemidaSDK\Include\C;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions Condition="'$(ZW_THEMIDA)'!=''">ZW_THEMIDA;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <SDLCheck>false</SDLCheck>
+    </ClCompile>
+    <Link>
+      <SubSystem>Windows</SubSystem>
+      <GenerateDebugInformation>false</GenerateDebugInformation>
+      <AdditionalLibraryDirectories>$(ProjectDir);D:\obf\Themida\ThemidaSDK\Lib\COFF;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>crypt32.lib;d3d11.lib;dxgi.lib;d3dcompiler.lib;winmm.lib;ws2_32.lib;SecureEngineSDK64.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalOptions>/OPT:NOREF /OPT:NOICF %(AdditionalOptions)</AdditionalOptions>
+    </Link>
+    <ResourceCompile>
+      <AdditionalIncludeDirectories>$(ProjectDir);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ResourceCompile>
+  </ItemDefinitionGroup>
+
+  <ItemGroup>
+    <ClCompile Include="dllmain.cpp" />
+    <ClCompile Include="log.cpp" />
+    <ClCompile Include="ace_blackhole.cpp" />
+    <ClCompile Include="stealth.cpp" />
+    <ClCompile Include="obf.cpp" />
+    <ClCompile Include="fake_server.cpp" />
+    <ClCompile Include="fake_trust.cpp" />
+    <ClCompile Include="ue.cpp" />
+    <ClCompile Include="esp.cpp" />
+    <ClCompile Include="bones.cpp" />
+    <ClCompile Include="canvas.cpp" />
+    <ClCompile Include="capture_guard.cpp" />
+    <ClCompile Include="sdk.cpp" />
+    <ClCompile Include="features.cpp" />
+    <ClCompile Include="skeleton.cpp" />
+    <ClCompile Include="game_systems.cpp" />
+    <ClCompile Include="aim.cpp" />
+    <ClCompile Include="skill.cpp" />
+    <ClCompile Include="gui.cpp" />
+    <ClCompile Include="d3d.cpp" />
+    <ClCompile Include="font.cpp" />
+    <ClCompile Include="input.cpp" />
+    <ClCompile Include="gfxprobe.cpp" />
+    <ClCompile Include="overlay.cpp" />
+    <ClCompile Include="..\third_party\imgui\imgui.cpp" />
+    <ClCompile Include="..\third_party\imgui\imgui_draw.cpp" />
+    <ClCompile Include="..\third_party\imgui\imgui_tables.cpp" />
+    <ClCompile Include="..\third_party\imgui\imgui_widgets.cpp" />
+    <ClCompile Include="..\third_party\imgui\imgui_impl_dx11.cpp" />
+    <ClCompile Include="..\third_party\imgui\imgui_impl_win32.cpp" />
+    <ClCompile Include="..\third_party\minhook\src\buffer.c" />
+    <ClCompile Include="..\third_party\minhook\src\hook.c" />
+    <ClCompile Include="..\third_party\minhook\src\trampoline.c" />
+    <ClCompile Include="..\third_party\minhook\src\hde\hde64.c" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ClInclude Include="offsets.h" />
+    <ClInclude Include="log.h" />
+    <ClInclude Include="ace_blackhole.h" />
+    <ClInclude Include="stealth.h" />
+    <ClInclude Include="obf.h" />
+    <ClInclude Include="fake_server.h" />
+    <ClInclude Include="fake_trust.h" />
+    <ClInclude Include="fake_cert.h" />
+    <ClInclude Include="ue.h" />
+    <ClInclude Include="esp.h" />
+    <ClInclude Include="bones.h" />
+    <ClInclude Include="canvas.h" />
+    <ClInclude Include="capture_guard.h" />
+    <ClInclude Include="sdk.h" />
+    <ClInclude Include="features.h" />
+    <ClInclude Include="skeleton.h" />
+    <ClInclude Include="game_systems.h" />
+    <ClInclude Include="aim.h" />
+    <ClInclude Include="skill.h" />
+    <ClInclude Include="gui.h" />
+    <ClInclude Include="d3d.h" />
+    <ClInclude Include="font.h" />
+    <ClInclude Include="font_ranges.h" />
+    <ClInclude Include="input.h" />
+    <ClInclude Include="gfxprobe.h" />
+    <ClInclude Include="overlay.h" />
+    <ClInclude Include="resource.h" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ResourceCompile Include="cheat.rc" />
+    <!-- P2: mimic the genuine zlibwapi.dll VERSIONINFO so the proxy is not
+         distinguishable by file metadata alone -->
+    <ResourceCompile Include="version.rc" />
+  </ItemGroup>
+
+  <ItemGroup>
+  </ItemGroup>
+
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+</Project>
