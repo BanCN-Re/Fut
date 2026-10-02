@@ -1,0 +1,45 @@
+feat: 硬锁/软锁双模式 Aim + 运行时按键绑定；修飘飞玄化锁不到与卡顿
+
+## 硬锁 / 软锁（可独立开启，各自绑键）
+- SOFT：按秒指数逼近，跟枪手感，可绑定任意键
+- HARD：每 tick 写精确角度，直接锁死；新增"松开后保持 N ms"
+- 两者可同时开（硬锁优先），也可绑不同键
+- 各自支持 按住 / 切换 两种触发方式
+
+## 运行时按键绑定（新增 keybind 模块）
+- 点"绑定"按钮 -> 显示"请按键..." -> 按下目标键 -> 自动绑定并显示
+- 支持全部键盘键 / F1-F24 / 小键盘 / 鼠标左中右 / 侧键 X1 X2
+- ESC 取消；右键清除绑定
+- X1/X2 特殊处理：Windows 只以 WM_XBUTTONDOWN 高位字给出，
+  无 VK 码且 GetAsyncKeyState 看不到，必须走 WndProc
+
+## 修复：飘飞 / 玄化状态锁不到人
+根因：AnglesTo 用 CAMERA 位置算角度，而 ControlRotation 是相对 PAWN 的。
+第三人称下两者本就有偏差，飘飞/玄化时相机远离角色，偏差超出容差。
+改为以 pawn 眼位为原点计算。
+
+## 修复：锁定时游戏卡顿
+根因：WriteGuarded 每次写入都 VirtualQuery + VirtualProtect x2（取地址空间锁），
+而 idle 循环 8ms 一轮 -> 每秒上百次内核操作。
+改为首次验证可写后直接写，仅在失败时回退 guarded 路径。
+
+## 修复：打开 GUI 卡顿
+根因：SetOpaque 每帧调 DwmExtendFrameIntoClientArea + SetLayeredWindowAttributes
+（两次 DWM 同步往返）。改为只在首次应用。
+
+## 修复：移动靶锁不稳
+新增目标速度测量 + 命中点前导（lead），按 120ms 收敛时间外推；
+快速目标自动从头部改瞄胸部（头骨是抖动最大的关节）。
+
+## 修复：X1/X2 侧键完全收不到
+input::OnWndProcMessage 首行即对非键盘消息 return false，鼠标消息全丢。
+改为所有消息先过 keybind，且新增游戏窗口 WndProc 子类化
+（overlay 窗口是穿透的，收不到鼠标）。
+
+## 骨骼
+修正 head/feet 跨度与 chest/pelvis 基准不一致的问题
+（原来 wantChest = minZ + height*0.78，minZ 来自骨骼、height 来自胶囊，
+两个基准混用导致 chestZ 高于 headZ）。
+现在跨度与分数点同源。census 改用可工作的 refskeleton 数组。
+
+构建通过（4,280,320 B）。

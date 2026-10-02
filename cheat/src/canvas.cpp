@@ -1,4 +1,4 @@
-﻿// D:\Work\Fut\cheat\src\canvas.cpp
+// D:\Work\Fut\cheat\src\canvas.cpp
 // In-game UCanvas drawing (rationale in canvas.h).
 //
 // CALLING CONVENTION -- READ THIS BEFORE CHANGING ANYTHING
@@ -286,18 +286,34 @@ long DrawOkCalls()  { return s_okCalls; }
 long DrawBadCalls() { return s_badCalls; }
 
 static inline void ProcessEventNative(void* self, uintptr_t fn, void* params) {
-    const uint32_t flagsAddr = static_cast<uint32_t>(fn + kFunctionFlags);
-    const uint32_t saved = *reinterpret_cast<uint32_t*>(flagsAddr);
+    // -----------------------------------------------------------------------
+    // ADDRESS TYPE BUG -- `uint32_t flagsAddr` WAS TRUNCATING A 64-BIT POINTER.
+    //
+    // UFunction::FunctionFlags lives at +0xD8 from the function object, so on x64
+    // that is a full 64-bit address like 0x000001F4A2C3D0D8. Declaring the local
+    // as uint32_t cut it to 0xA2C3D0D8, and `reinterpret_cast<uint32_t*>(...)`
+    // then ZERO-EXTENDED that back to 0x00000000A2C3D0D8 -- an address in the low
+    // 4 GB that belongs to nothing we own.
+    //
+    // Writing there either faulted (caught by the caller's SEH, so the flag was
+    // simply never set and native calls misbehaved) or, worse, landed in some
+    // other mapping. The compiler flagged it as C4312 and it was correct to.
+    //
+    // uintptr_t throughout, and the read/write go through volatile so the
+    // optimiser cannot fold the restore away.
+    // -----------------------------------------------------------------------
+    volatile uint32_t* flags = reinterpret_cast<volatile uint32_t*>(fn + kFunctionFlags);
+    const uint32_t saved = *flags;
 
     // only touch the flag when it is actually missing
     const bool needSet = (saved & kFuncNative) == 0;
     if (needSet)
-        *reinterpret_cast<uint32_t*>(flagsAddr) = saved | kFuncNative;
+        *flags = saved | kFuncNative;
 
     s_processEvent(self, reinterpret_cast<void*>(fn), params);
 
     if (needSet)
-        *reinterpret_cast<uint32_t*>(flagsAddr) = saved;
+        *flags = saved;
 }
 
 static void CallDrawLine(void* cv, float x1, float y1, float x2, float y2,

@@ -283,166 +283,151 @@ static bool GetImpl(uintptr_t character, BoneSet& out) {
     if (!ue::Read(data, buf, bytes)) { static int c5=0; if(c5++<3) LOG(SBOX("[bones] Get: read failed (%d bytes)",0xB9), (int)bytes); return false; }
 
     // -----------------------------------------------------------------------
-    // BONE SELECTION -- RESTRICTED TO THE BODY.
+    // BONE -> WORLD, WITHOUT THE WEAPON BONES.
     //
-    // The mesh this resolves carries 246 bones because the weapon and cosmetics
-    // are skinned to the same component. Taking the global highest/lowest bone
-    // therefore picked a WEAPON barrel tip as "head" and an attachment as "feet",
-    // which is why the skeleton and the box were wrong even though the bone data
-    // itself was perfect.
+    // THE BUG THAT PRODUCED "chestZ ABOVE headZ":
     //
-    // Fix: find the body axis first. Most bones in any humanoid skeleton are
-    // torso/limb bones clustered around the character's vertical axis, so the
-    // MEDIAN of all bone X/Y is a stable estimate of that axis. Then head/feet are
-    // the extremes among bones lying WITHIN kBodyRadius of it. A rifle sticking
-    // out sideways or a hat floating above is excluded; the skull and the soles
-    // are not.
+    // The previous version picked head = highest bone and feet = lowest bone,
+    // both filtered to a 45 uu cylinder around the body axis. It then OVERRODE
+    // head/feet with the capsule span but left chest/pelvis searching the BONE
+    // array against a target height computed from a DIFFERENT origin:
     //
-    // This needs no bone names and no per-skeleton index table, so it also
-    // survives a game patch that re-orders the skeleton.
+    //     wantChest = minZ + height * 0.78f    // minZ from bones
+    //                                          // height from the CAPSULE
+    //
+    // Two different baselines in one expression. minZ is the lowest body bone
+    // (around the ankle), while height is the full capsule span (feet to skull).
+    // Adding 78% of the capsule height to an ankle position lands ABOVE the head,
+    // which is exactly what the log showed:
+    //
+    //     headZ=1276.9  chestZ=1334.6  pelvisZ=1288.6
+    //                     ^ above head    ^ above head
+    //
+    // The fix is to stop mixing sources. The capsule owns the vertical span
+    // (nothing a weapon does can change HalfHeight), so chest and pelvis are
+    // derived from the SAME capsule-derived feet/head that the box uses:
+    //
+    //     feet  = axisZ - capHalf
+    //     head  = axisZ + capHalf * 0.80      (skull centre, not the capsule cap)
+    //     chest = feet + (head - feet) * 0.78
+    //     pelvis= feet + (head - feet) * 0.52
+    //
+    // Their X/Y come from the body axis, and the Z is taken from the NEAREST BONE
+    // to that height so the anchors still follow the pose (lean, crouch) instead
+    // of being a rigid column. Bones only ever SUPPLY a refinement here; they can
+    // no longer move an anchor past a sanity bound.
     // -----------------------------------------------------------------------
-    const float kBodyRadius = 45.0f;   // uu; generous enough for shoulders
+    const float kBodyRadius = 60.0f;   // uu; shoulders + a little slack
 
-    // -----------------------------------------------------------------------
-    // BODY VERTICAL AXIS -- FROM THE ACTOR, NOT FROM A BONE MEDIAN.
-    //
-    // The median of all bone X/Y was meant to find the character's centre line,
-    // but this mesh carries 246 bones because the WEAPON and cosmetics are skinned
-    // to the same component. Most of those extra bones sit out at the gun, so the
-    // median drifted off the body and the 45uu radius filter then threw away the
-    // real foot bones. Result: feetZ landed around the knees and the box was short
-    // at the bottom and tall at the top -- the "box is too high" report.
-    //
-    // A UE4 actor's origin IS the centre of its capsule base, i.e. the point
-    // between the feet. That is exactly the axis we want, it costs one read, and
-    // no amount of weapon geometry can move it.
-    // -----------------------------------------------------------------------
-    // CAPSULE GEOMETRY -- the box anchor. Read once here, used after pass 2.
-    // For ACharacter the RootComponent IS the capsule; its origin sits at the
-    // CAPSULE CENTRE, so feet = centre - HalfHeight and head ~= centre + 92%.
-    // Bone-scan extremes stay as the fallback when the capsule is unreadable.
-    float capHalf = 0.0f;      // 0 = unusable
-    float axisZ   = 0.0f;      // capsule centre Z (actor Z)
+    // ---- 1. capsule span: authoritative for the vertical extent -------------
+    float capHalf = 0.0f;
+    float axisZ   = 0.0f;
     {
-        float actorX = 0, actorY = 0, actorZ = 0;
         uintptr_t root = ue::R64(character + off::AA_RootComponent);
         if (ue::PtrOk(root)) {
             const uintptr_t c2w = root + off::Comp_ComponentToWorld;
-            actorX = ue::RF32(c2w + 0x10);
-            actorY = ue::RF32(c2w + 0x14);
-            actorZ = ue::RF32(c2w + 0x18);
-
-            const uintptr_t cap = ue::R64(character + off::ACh_CapsuleComponent);
-            if (ue::PtrOk(cap)) {
-                const float hh = ue::RF32(cap + off::Capsule_HalfHeight);
-                if (hh > 40.0f && hh < 130.0f) capHalf = hh;   // sane humanoid range
-            }
+            const float ax = ue::RF32(c2w + 0x10);
+            const float ay = ue::RF32(c2w + 0x14);
+            const float az = ue::RF32(c2w + 0x18);
+            if (Plausible(az)) axisZ = az;
+            if (Plausible(ax) && Plausible(ay)) { out.axisX = ax; out.axisY = ay; }
         }
-        if (Plausible(actorZ)) axisZ = actorZ;
-        if (Plausible(actorX) && Plausible(actorY)) {
-            out.axisX = actorX;
-            out.axisY = actorY;
-        } else {
-            // Fallback only when the root component is unreadable: use the mesh
-            // component's own world translation, which is also on the body.
-            out.axisX = t[0];
+        if (!Plausible(out.axisX) || !Plausible(out.axisY)) {
+            out.axisX = t[0];          // mesh world translation as the fallback
             out.axisY = t[1];
+        }
+
+        const uintptr_t cap = ue::R64(character + off::ACh_CapsuleComponent);
+        if (ue::PtrOk(cap)) {
+            const float hh = ue::RF32(cap + off::Capsule_HalfHeight);
+            if (hh > 40.0f && hh < 130.0f) capHalf = hh;    // sane humanoid range
         }
     }
 
-    // pass 2: extremes restricted to the body radius
+    // ---- 2. collect the body bones once (world space) -----------------------
+    // A bone belongs to the body when it is close to the vertical axis. Bones are
+    // already converted to world, so this also rejects the weapon, which is
+    // skinned to the same component but hangs off to one side.
+    struct WBone { float x, y, z; };
+    static thread_local WBone wb[512];
+    int wbn = 0;
+    for (int i = 0; i < count && wbn < 512; ++i) {
+        const uint8_t* f = buf + (size_t)i * 0x30;
+        float cs[3];
+        memcpy(&cs[0], f + 0x10, 4);
+        memcpy(&cs[1], f + 0x14, 4);
+        memcpy(&cs[2], f + 0x18, 4);
+        if (!Plausible(cs[0]) || !Plausible(cs[1]) || !Plausible(cs[2])) continue;
+
+        float w[3];
+        ToWorld(q, t, cs, w);
+        if (!Plausible(w[0]) || !Plausible(w[1]) || !Plausible(w[2])) continue;
+
+        const float ddx = w[0] - out.axisX, ddy = w[1] - out.axisY;
+        if (ddx * ddx + ddy * ddy > kBodyRadius * kBodyRadius) continue;
+
+        wb[wbn].x = w[0]; wb[wbn].y = w[1]; wb[wbn].z = w[2];
+        ++wbn;
+    }
+    if (wbn < 6) return false;                      // body not identifiable
+
+    // ---- 3. vertical span: capsule if available, else the body bones --------
+    float feetZ, headZ;
+    bool fromCapsule = false;
+    if (capHalf > 0.0f && axisZ != 0.0f) {
+        const float cFeet = axisZ - capHalf;
+        // 0.80 puts the anchor at the SKULL CENTRE; the box adds +16 uu so it
+        // still encloses the top of the head without floating.
+        const float cHead = axisZ + capHalf * 0.80f;
+        if (cHead - cFeet > 100.0f && cHead - cFeet < 260.0f) {
+            feetZ = cFeet; headZ = cHead; fromCapsule = true;
+        }
+    }
+    if (!fromCapsule) {
+        // Bone-only fallback. The body filter already removed the weapon, so the
+        // extremes are trustworthy here.
+        feetZ = wb[0].z; headZ = wb[0].z;
+        for (int i = 1; i < wbn; ++i) {
+            if (wb[i].z < feetZ) feetZ = wb[i].z;
+            if (wb[i].z > headZ) headZ = wb[i].z;
+        }
+    }
+
+    const float height = headZ - feetZ;
+    if (!(height > 50.0f && height < 400.0f)) return false;
+
+    out.headZ = headZ;
+    out.feetZ = feetZ;
+    out.headX = out.axisX; out.headY = out.axisY;
+    out.feetX = out.axisX; out.feetY = out.axisY;
+
+    // ---- 4. chest / pelvis: fractions of the SAME span ----------------------
+    //
+    // Z comes from the span; X/Y are snapped to the nearest body bone at that
+    // height so the anchors follow a lean or a crouch. The snap is bounded: a
+    // candidate more than 25 uu away vertically is ignored, which keeps a stray
+    // bone from dragging an anchor off the torso.
     {
-        float minZ = 1e30f, maxZ = -1e30f;
-        float headX = 0, headY = 0, feetX = 0, feetY = 0;
-        int used = 0;
+        const float wantChest  = feetZ + height * 0.78f;
+        const float wantPelvis = feetZ + height * 0.52f;
 
-        for (int i = 0; i < count; ++i) {
-            const uint8_t* f = buf + (size_t)i * 0x30;
-            float cs[3];
-            memcpy(&cs[0], f + 0x10, 4);
-            memcpy(&cs[1], f + 0x14, 4);
-            memcpy(&cs[2], f + 0x18, 4);
-            if (!Plausible(cs[0]) || !Plausible(cs[1]) || !Plausible(cs[2])) continue;
+        const float kSnapMax = 25.0f;
 
-            float w[3];
-            ToWorld(q, t, cs, w);
-            if (!Plausible(w[0]) || !Plausible(w[1]) || !Plausible(w[2])) continue;
-
-            // body filter
-            const float ddx = w[0] - out.axisX, ddy = w[1] - out.axisY;
-            if (ddx * ddx + ddy * ddy > kBodyRadius * kBodyRadius) continue;
-
-            ++used;
-            if (w[2] > maxZ) { maxZ = w[2]; headX = w[0]; headY = w[1]; }
-            if (w[2] < minZ) { minZ = w[2]; feetX = w[0]; feetY = w[1]; }
-        }
-
-        if (used < 6) return false;                 // body not identified
-        out.headX = headX; out.headY = headY; out.headZ = maxZ;
-        out.feetX = feetX; out.feetY = feetY; out.feetZ = minZ;
-
-        // -------------------------------------------------------------------
-        // CAPSULE OVERRIDE -- WHY THE BOX WAS STILL "TOO HIGH".
-        //
-        // The bone extremes are correct ONLY if every bone inside the 45 uu
-        // body radius belongs to the body. It does not: when a bot aims its
-        // weapon up, the gun barrel bones sit above the HEAD while still within
-        // 45 uu of the body axis. maxZ then lands on the muzzle, the box top
-        // floats above the head, and because the box is centred on its own
-        // height the whole box shifts up. Same class of bug as the old median
-        // drift, just from the gun instead of the cosmetics.
-        //
-        // The capsule cannot lie: HalfHeight is a plain float on the capsule
-        // component and no weapon changes it. Box = capsule span; bones keep
-        // their job (chest/pelvis anchors and the skeleton) but no longer own
-        // the box.
-        // -------------------------------------------------------------------
-        float topZ = maxZ, botZ = minZ;
-        if (capHalf > 0.0f && axisZ != 0.0f) {
-            const float cFeet = axisZ - capHalf;
-            // HEAD ANCHOR: the capsule cap sits ABOVE the visual head (the
-            // mesh's skull top is inside it), so 0.92*half put the skeleton's
-            // head point floating over the body ("骨骼头在身体上方").
-            // 0.80*half lands on the skull centre; the box compensates with
-            // +16 uu in DrawOneInGame so it still encloses the head.
-            const float cHead = axisZ + capHalf * 0.80f;
-            if (cHead - cFeet > 100.0f && cHead - cFeet < 260.0f) {
-                botZ = cFeet;
-                topZ = cHead;
-                // anchors on the body axis, not on whichever bone won the max
-                out.headX = out.axisX; out.headY = out.axisY;
-                out.feetX = out.axisX; out.feetY = out.axisY;
-            }
-        }
-
-        const float height = topZ - botZ;
-        if (!(height > 50.0f && height < 400.0f)) return false;
-        out.headZ = topZ;
-        out.feetZ = botZ;
-
-        // chest / pelvis as fractions of the BODY height
-        const float wantChest  = minZ + height * 0.78f;
-        const float wantPelvis = minZ + height * 0.52f;
         float bestChest = 1e30f, bestPelvis = 1e30f;
+        out.chestX  = out.axisX; out.chestY  = out.axisY; out.chestZ  = wantChest;
+        out.pelvisX = out.axisX; out.pelvisY = out.axisY; out.pelvisZ = wantPelvis;
 
-        for (int i = 0; i < count; ++i) {
-            const uint8_t* f = buf + (size_t)i * 0x30;
-            float cs[3];
-            memcpy(&cs[0], f + 0x10, 4);
-            memcpy(&cs[1], f + 0x14, 4);
-            memcpy(&cs[2], f + 0x18, 4);
-            if (!Plausible(cs[0]) || !Plausible(cs[1]) || !Plausible(cs[2])) continue;
-            float w[3];
-            ToWorld(q, t, cs, w);
-            if (!Plausible(w[0]) || !Plausible(w[1]) || !Plausible(w[2])) continue;
-
-            const float ddx = w[0] - out.axisX, ddy = w[1] - out.axisY;
-            if (ddx * ddx + ddy * ddy > kBodyRadius * kBodyRadius) continue;
-
-            const float dc = fabsf(w[2] - wantChest);
-            if (dc < bestChest) { bestChest = dc; out.chestX = w[0]; out.chestY = w[1]; out.chestZ = w[2]; }
-            const float dp = fabsf(w[2] - wantPelvis);
-            if (dp < bestPelvis) { bestPelvis = dp; out.pelvisX = w[0]; out.pelvisY = w[1]; out.pelvisZ = w[2]; }
+        for (int i = 0; i < wbn; ++i) {
+            const float dc = fabsf(wb[i].z - wantChest);
+            if (dc < bestChest && dc <= kSnapMax) {
+                bestChest = dc;
+                out.chestX = wb[i].x; out.chestY = wb[i].y; out.chestZ = wb[i].z;
+            }
+            const float dp = fabsf(wb[i].z - wantPelvis);
+            if (dp < bestPelvis && dp <= kSnapMax) {
+                bestPelvis = dp;
+                out.pelvisX = wb[i].x; out.pelvisY = wb[i].y; out.pelvisZ = wb[i].z;
+            }
         }
     }
 

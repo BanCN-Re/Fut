@@ -1,6 +1,8 @@
-// D:\Work\Fut\cheat\src\input.cpp
+﻿// D:\Work\Fut\cheat\src\input.cpp
 #include "input.h"
 #include "gui.h"
+#include "keybind.h"
+#include "obf.h"
 #include "log.h"
 
 #include <windows.h>
@@ -67,6 +69,30 @@ static void RequestToggle(const char* path) {
 // ---------------------------------------------------------------------------
 bool OnWndProcMessage(void* hwnd, unsigned int msg, uintptr_t wparam, intptr_t lparam) {
     (void)hwnd;
+
+    // -----------------------------------------------------------------------
+    // EVERY message goes to keybind FIRST, including the mouse ones.
+    //
+    // This is what makes the mouse side buttons (X1/X2) bindable at all.
+    // Windows reports them ONLY as WM_XBUTTONDOWN/UP with the button index in the
+    // HIGH word of wParam -- there is no VK code and GetAsyncKeyState cannot see
+    // them, so if the detour drops mouse messages they can never be captured.
+    //
+    // The previous version returned early for anything that was not a keyboard
+    // message, so X1/X2 were invisible to the whole program.
+    //
+    // Swallowing: a message is only consumed when keybind is CAPTURING (the user
+    // clicked Bind and we are waiting for a key). Otherwise the game receives the
+    // mouse normally, which matters -- swallowing the fire button would be fatal.
+    // -----------------------------------------------------------------------
+    const int bound = keybind::OnWndProcMessage(msg, wparam, lparam);
+    if (bound != keybind::kNone) {
+        LOG(SBOX("[input] keybind captured 0x%X", 0x1F3), bound);
+        return true;                     // swallow while capturing
+    }
+    if (keybind::Capturing())
+        return true;                     // capturing: absorb, do not reach the game
+
     if (msg != WM_KEYDOWN && msg != WM_SYSKEYDOWN &&
         msg != WM_KEYUP   && msg != WM_SYSKEYUP)
         return false;

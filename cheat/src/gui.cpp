@@ -11,6 +11,7 @@
 #include "capture_guard.h"
 #include "overlay.h"
 #include "features.h"
+#include "keybind.h"
 #include "canvas.h"
 #include "esp.h"
 #include "aim.h"
@@ -75,6 +76,64 @@ static void UpdateCursor() {
 // than let them drift, the important switches are mirrored here so a single click
 // affects both renderers.
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// BIND BUTTON -- "click, then press the key you want"
+//
+// Behaviour:
+//   * shows the current binding, or 无 when unbound
+//   * click -> enters capture: the label changes to 请按键...
+//   * the next key or mouse button pressed (including the X1/X2 side buttons,
+//     which keybind routes through the WndProc because Windows gives them no VK
+//     code) becomes the binding
+//   * shows 绑定成功 for a moment, then returns to showing the key
+//   * ESC cancels instead of binding, and a second click on the button also
+//     cancels -- a capture you cannot escape is a trap
+//
+// The capture itself lives in keybind so it also works while the game window has
+// focus: the WndProc detour feeds it, not ImGui.
+// ---------------------------------------------------------------------------
+static void BindButton(const char* label, int& vk) {
+    ImGui::PushID(&vk);
+
+    // A key may have arrived since the last frame.
+    int got = keybind::kNone;
+    if (keybind::ConsumeCaptured(got) && got != keybind::kNone) {
+        vk = got;
+        LOG(SBOX("[bind] '%s' bound to 0x%X", 0x1F1), label, vk);
+    }
+
+    const bool capturing = keybind::Capturing();
+
+    // Button text: label on the left, current binding on the right.
+    char text[192];
+    if (capturing)
+        _snprintf_s(text, sizeof(text), _TRUNCATE, u8"%s: 请按键...（ESC 取消）", label);
+    else
+        _snprintf_s(text, sizeof(text), _TRUNCATE, u8"%s: %s", label, keybind::Name(vk));
+
+    const float w = ImGui::GetContentRegionAvail().x;
+    if (capturing)
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.65f, 0.35f, 0.15f, 1.0f));
+
+    if (ImGui::Button(text, ImVec2(w, 0))) {
+        if (capturing) keybind::CancelCapture();
+        else           keybind::BeginCapture();
+    }
+
+    if (capturing) ImGui::PopStyleColor();
+
+    // Right-click clears the binding, so 无 is reachable without a keyboard trick.
+    if (ImGui::IsItemHovered() && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+        vk = keybind::kNone;
+        keybind::CancelCapture();
+        LOG(SBOX("[bind] '%s' cleared", 0x1F2), label);
+    }
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip(u8"左键点击后按下要绑定的按键\n（支持键盘 / 鼠标左右中键 / 侧键 X1 X2）\n右键清除绑定");
+
+    ImGui::PopID();
+}
+
 void SyncFeatureFlags() {
     features::g.espEnable    = esp::g_settings.enabled;
     features::g.espBox       = esp::g_settings.box;
@@ -261,28 +320,55 @@ void Render() {
 
     // ---- Aim ----
     ImGui::Spacing();
-    if (ImGui::CollapsingHeader(u8"Aim 自瞄")) {
-        ImGui::Checkbox(u8"启用 Aim", &aim::g_settings.enabled);
-        ImGui::Checkbox(u8"按住触发键才生效", &aim::g_settings.holdKey);
-        ImGui::TextDisabled(u8"触发键: 右键 (VK 0x02)");
+    if (ImGui::CollapsingHeader(u8"Aim 自瞄（硬锁 / 软锁）", ImGuiTreeNodeFlags_DefaultOpen)) {
+        ImGui::Checkbox(u8"启用 Aim 总开关", &aim::g_settings.enabled);
+
+        ImGui::Separator();
+        ImGui::TextDisabled(u8"软锁 Soft —— 平滑移动准心（跟枪手感）");
+        ImGui::Checkbox(u8"启用软锁", &aim::g_settings.softEnable);
+        BindButton(u8"软锁触发键", aim::g_settings.softKey);
+        ImGui::Checkbox(u8"软锁：按住生效（关=切换）", &aim::g_settings.softHold);
+        ImGui::SetNextItemWidth(-1.0f);
+        ImGui::SliderFloat(u8"软锁平滑（越大越慢）", &aim::g_settings.smooth, 1.0f, 30.0f, "%.1f");
+
+        ImGui::Separator();
+        ImGui::TextDisabled(u8"硬锁 Hard —— 直接锁死目标（必中手感）");
+        ImGui::Checkbox(u8"启用硬锁", &aim::g_settings.hardEnable);
+        BindButton(u8"硬锁触发键", aim::g_settings.hardKey);
+        ImGui::Checkbox(u8"硬锁：按住生效（关=切换）", &aim::g_settings.hardHold);
+        ImGui::SetNextItemWidth(-1.0f);
+        ImGui::SliderFloat(u8"硬锁松开后保持 (ms)", &aim::g_settings.hardHoldMs, 0.0f, 500.0f, u8"%.0f");
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip(u8"松开触发键后继续锁定的时间，\n用于甩枪后立刻松开仍保持命中");
+
+        ImGui::Separator();
+        ImGui::TextDisabled(u8"目标选择（两种锁共用）");
         ImGui::Checkbox(u8"队友过滤", &aim::g_settings.teamCheck);
         ImGui::Checkbox(u8"瞄准头部（否则瞄胸部）", &aim::g_settings.boneHead);
+        ImGui::Checkbox(u8"快速移动时自动改瞄胸部", &aim::g_settings.preferChestWhenMoving);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip(u8"头骨是全身最抖的关节，飘飞/冲刺时\n每帧位移远大于胸腔，改瞄胸部更稳");
+        ImGui::SetNextItemWidth(-1.0f);
+        ImGui::SliderFloat(u8"判定为快速的阈值 (uu/s)", &aim::g_settings.movingThreshold,
+                           50.0f, 1500.0f, u8"%.0f");
         ImGui::Checkbox(u8"FOV 限制", &aim::g_settings.fovLimit);
         ImGui::SetNextItemWidth(-1.0f);
         ImGui::SliderFloat(u8"FOV 角度", &aim::g_settings.fov, 5.0f, 180.0f, "%.0f");
-        ImGui::SetNextItemWidth(-1.0f);
-        ImGui::SliderFloat(u8"平滑 (越大越慢)", &aim::g_settings.smooth, 1.0f, 30.0f, "%.1f");
-        ImGui::Checkbox(u8"静默锁定（不平滑，风险高）", &aim::g_settings.silentLock);
+
         ImGui::Separator();
         ImGui::TextDisabled(u8"拟人抖动");
         ImGui::Checkbox(u8"启用随机抖动", &aim::g_settings.jitter);
         ImGui::SetNextItemWidth(-1.0f);
-        ImGui::SliderFloat(u8"抖动幅度", &aim::g_settings.jitterPct, 0.01f, 0.50f, "%.0f%%");
+        ImGui::SliderFloat(u8"抖动幅度 (度)", &aim::g_settings.jitterPct, 0.05f, 3.0f, u8"%.2f");
         ImGui::SetNextItemWidth(-1.0f);
         ImGui::SliderFloat(u8"抖动频率", &aim::g_settings.jitterHz, 1.0f, 30.0f, "%.0f Hz");
+
         ImGui::Separator();
-        ImGui::Text(u8"目标数: %d   有目标: %s   屏距: %.0f px",
-                    aim::TargetCount(), aim::HasTarget() ? u8"是" : u8"否", aim::LastFov());
+        const char* modeName = aim::ActiveMode() == aim::Mode::Hard ? u8"硬锁"
+                             : aim::ActiveMode() == aim::Mode::Soft ? u8"软锁" : u8"空闲";
+        ImGui::Text(u8"状态: %s   目标数: %d   有目标: %s",
+                    modeName, aim::TargetCount(), aim::HasTarget() ? u8"是" : u8"否");
+        if (aim::HardLocked()) ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), u8"硬锁锁定中");
         if (aim::LastError()[0]) ImGui::TextDisabled(u8"状态: %s", aim::LastError());
     }
 

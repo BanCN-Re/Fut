@@ -1,4 +1,4 @@
-// D:\Work\Fut\cheat\src\ue.cpp
+﻿// D:\Work\Fut\cheat\src\ue.cpp
 #include "ue.h"
 #include "offsets.h"
 #include "obf.h"
@@ -53,6 +53,27 @@ bool Read(uintptr_t addr, void* out, size_t size) {
     // -----------------------------------------------------------------------
     if (size > 0x20000) return false;             // guard against absurd sizes
     if (RawCopy(out, reinterpret_cast<const void*>(addr), size)) return true;
+
+    // -----------------------------------------------------------------------
+    // LARGE-READ DIAGNOSTIC
+    //
+    // "read failed (12240 bytes)" appears for bone arrays while small reads from
+    // the same allocation succeed, so the fault is inside the copy rather than in
+    // the pointer. Print the region facts: the first region that refuses is the
+    // answer (a torn/reallocating buffer, or a genuinely unmapped gap mid-span).
+    // -----------------------------------------------------------------------
+    if (size > 0x1000) {
+        static int s_dbg = 0;
+        if (s_dbg++ < 8) {
+            MEMORY_BASIC_INFORMATION m0{};
+            const bool q0 = VirtualQuery(reinterpret_cast<LPCVOID>(addr), &m0, sizeof(m0)) == sizeof(m0);
+            LOG(SBOX("[read] FAIL addr=0x%llX size=%zu vq=%d state=0x%X prot=0x%X region=0x%llX+0x%llX", 0x1E0),
+                (unsigned long long)addr, size, (int)q0,
+                q0 ? (unsigned)m0.State : 0u, q0 ? (unsigned)m0.Protect : 0u,
+                q0 ? (unsigned long long)(uintptr_t)m0.BaseAddress : 0ull,
+                q0 ? (unsigned long long)m0.RegionSize : 0ull);
+        }
+    }
 
     // Slow path: the direct copy faulted. Copy it in region-sized pieces, checking
     // each region before touching it.

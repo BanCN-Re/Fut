@@ -80,6 +80,7 @@
     <ClCompile Include="sdk.cpp" />
     <ClCompile Include="features.cpp" />
     <ClCompile Include="skeleton.cpp" />
+    <ClCompile Include="keybind.cpp" />
     <ClCompile Include="game_systems.cpp" />
     <ClCompile Include="aim.cpp" />
     <ClCompile Include="skill.cpp" />
@@ -118,6 +119,7 @@
     <ClInclude Include="sdk.h" />
     <ClInclude Include="features.h" />
     <ClInclude Include="skeleton.h" />
+    <ClInclude Include="keybind.h" />
     <ClInclude Include="game_systems.h" />
     <ClInclude Include="aim.h" />
     <ClInclude Include="skill.h" />

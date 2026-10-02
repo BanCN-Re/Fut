@@ -148,3 +148,6 @@
 [loader] LoadLibrary D:\CLBQ\Calabiyau\CalabiyauGame\PM\Binaries\Win64\zw_core.dll
 [41876] GetProcAddress OK
 [41876] ZwCoreStart rc=0
+[loader] LoadLibrary D:\CLBQ\Calabiyau\CalabiyauGame\PM\Binaries\Win64\zw_core.dll
+[18056] GetProcAddress OK
+[18056] ZwCoreStart rc=0

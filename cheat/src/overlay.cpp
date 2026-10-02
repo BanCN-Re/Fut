@@ -254,6 +254,72 @@ static LRESULT CALLBACK OverlayWndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
 }
 
 // ---------------------------------------------------------------------------
+// GAME-WINDOW WNDPROC DETOUR
+//
+// WHY THIS IS NEEDED AT ALL
+//
+// The overlay window is click-through (colour key + WS_EX_TRANSPARENT) and is
+// usually not even the focused window, so it never sees the input the user cares
+// about. The GAME window does. Two features depend on reading that message
+// stream:
+//
+//   1. the menu key, so INSERT works while playing (input::OnWndProcMessage)
+//   2. KEY BINDING for the mouse side buttons X1/X2
+//
+// (2) is the reason this detour was added now: Windows delivers X1/X2 ONLY as
+// WM_XBUTTONDOWN / WM_XBUTTONUP with the index in the HIGH word of wParam. There
+// is no VK code for them, GetAsyncKeyState cannot see them, and raw input belongs
+// to the game. A WndProc detour is therefore the only way to bind them.
+//
+// This is a SetWindowLongPtr subclass, NOT a code patch: no game .text is touched,
+// so it cannot trip a byte-integrity check, and it is removed on shutdown.
+// ---------------------------------------------------------------------------
+static WNDPROC s_origGameWndProc = nullptr;
+static HWND    s_subclassedHwnd  = nullptr;
+
+static LRESULT CALLBACK GameWndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
+    // Hand every message to the input layer. It returns true only when the
+    // message was ours to consume (the menu key, or a key being captured for a
+    // binding) -- everything else falls through to the game untouched, which
+    // matters: eating the fire button would be fatal.
+    __try {
+        if (input::OnWndProcMessage(h, m, w, l))
+            return 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        // never let our handler take the game's window procedure down
+    }
+
+    if (s_origGameWndProc)
+        return CallWindowProcA(s_origGameWndProc, h, m, w, l);
+    return DefWindowProcW(h, m, w, l);
+}
+
+// Install on the game window. Safe to call repeatedly; does nothing once
+// installed on the current window.
+static void InstallGameWndProcHook(HWND game) {
+    if (!game || !IsWindow(game)) return;
+    if (s_subclassedHwnd == game) return;
+
+    // Restore any previous target first (the game can recreate its window on a
+    // resolution change).
+    if (s_subclassedHwnd && s_origGameWndProc) {
+        SetWindowLongPtrA(s_subclassedHwnd, GWLP_WNDPROC, (LONG_PTR)s_origGameWndProc);
+        s_origGameWndProc = nullptr;
+        s_subclassedHwnd = nullptr;
+    }
+
+    SetLastError(0);
+    const LONG_PTR prev = SetWindowLongPtrA(game, GWLP_WNDPROC, (LONG_PTR)GameWndProc);
+    if (prev == 0 && GetLastError() != 0) {
+        LOG("[overlay] game WndProc subclass FAILED err=%lu", GetLastError());
+        return;
+    }
+    s_origGameWndProc = reinterpret_cast<WNDPROC>(prev);
+    s_subclassedHwnd  = game;
+    LOG("[overlay] game WndProc subclassed (menu key + X1/X2 binding live)");
+}
+
+// ---------------------------------------------------------------------------
 // size / position to match the game window
 // ---------------------------------------------------------------------------
 void SyncToGameWindow() {
@@ -411,13 +477,33 @@ static void SetOpaque(bool opaque) {
     // -----------------------------------------------------------------------
     (void)opaque;      // kept for call-site compatibility; the mode is fixed
 
+    // -----------------------------------------------------------------------
+    // APPLY ONCE, NOT EVERY FRAME. THIS WAS THE "OPENING THE MENU LAGS" BUG.
+    //
+    // DwmExtendFrameIntoClientArea and SetLayeredWindowAttributes both round-trip
+    // to the compositor. Calling them from the render loop meant two synchronous
+    // DWM calls per frame, and the cost lands on the frame the menu opens or
+    // closes -- reported as "open the GUI and the game stutters".
+    //
+    // Both settings are sticky: once applied they stay until something else
+    // changes them, and the only thing that ever did was SetOpaque itself. So they
+    // are applied once and the result is not re-asserted.
+    //
+    // The verbose comment above explains why there is no mode to toggle; this
+    // guard is what makes that a saving rather than just a simplification.
+    // -----------------------------------------------------------------------
+    static bool s_applied = false;
+    if (s_applied) return;
+    s_applied = true;
+
     MARGINS all{ -1, -1, -1, -1 };
     DwmExtendFrameIntoClientArea(s_hwnd, &all);
-
-    // Idempotent: re-applying the same key is harmless and guarantees the key is
-    // present even if something else touched the window's layering.
     SetLayeredWindowAttributes(s_hwnd, kColorKey, 0, LWA_COLORKEY);
 
+    // If anything ever re-layers the window (a theme change, a DPI change), the
+    // key would be lost and the screen would go magenta. That is rare enough to
+    // ignore here; if it ever shows up, re-assert from the WndProc rather than
+    // from the render loop.
     s_opaque = false;
 }
 
@@ -946,6 +1032,12 @@ DWORD WINAPI ThreadProc(LPVOID) {
         // mode. RenderOnce() still calls it too, and Tick() is written to be
         // idempotent (it consumes a pending flag), so a double call is harmless.
         // -------------------------------------------------------------------
+        // Re-assert the game-window subclass. The game recreates its window on a
+        // resolution or fullscreen change, which silently drops the subclass and
+        // with it the menu key and the X1/X2 binding. The call is cheap (one
+        // pointer compare) and only does work when the handle actually changed.
+        InstallGameWndProcHook(s_gameHwnd);
+
         input::Tick();
 
         // -------------------------------------------------------------------
