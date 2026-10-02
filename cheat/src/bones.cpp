@@ -131,40 +131,168 @@ static bool GetImpl(uintptr_t character, BoneSet& out) {
             return true;
         };
 
-        // preferred offsets first, then a bounded structural scan
+        // -------------------------------------------------------------------
+        // COMPONENT VALIDATION -- BY UCLASS POINTER, NOT BY NAME
+        //
+        // WHY NAME MATCHING WAS THE WRONG TOOL
+        //
+        // Two attempts at a name test both failed, in opposite directions:
+        //
+        //   a) "ends with SkeletalMeshComponent"  -> rejected the CORRECT component.
+        //      Measured runtime names: 'PMSkelMeshComp', 'PMPaper2DSkeleltalMeshComp'.
+        //      This build abbreviates, so the C++ type UPMSkeletalMeshComponent is
+        //      never spelled out at runtime.
+        //
+        //   b) "contains Skel and Comp"           -> accepted 'SkeletalMesh', which
+        //      is USkeletalMesh: the ASSET, not a component. It carries 13 bones for
+        //      a prop, so the fallback scan happily picked it over the character's
+        //      real 79-bone rig.
+        //
+        // A name is a string that a patch, a locale or a build flag can change. The
+        // CLASS POINTER cannot be faked and does not depend on spelling at all.
+        //
+        // THE CORRECT TEST
+        //
+        //   Find the UClass object for USkeletalMeshComponent ONCE, then ask
+        //   ue::IsA(candidate, thatClass). IsA walks UStruct::SuperStruct (+0x40),
+        //   so every subclass in the chain matches automatically:
+        //
+        //       UPMSkeletalMeshComponent      -> derives from USkeletalMeshComponent
+        //       UWFBaseSkeletalMeshComponent  -> derives from USkeletalMeshComponent
+        //       UCyPendantSkeletalMeshComponent -> derives from USkeletalMeshComponent
+        //       USkeletalMesh (the asset)     -> does NOT; it is not a component
+        //
+        // It is also CHEAPER than the name version: pointer comparison along the
+        // super chain, with zero calls into the engine's FName machinery -- which is
+        // exactly the kind of call that corrupted the heap earlier in this session.
+        //
+        // The class is resolved lazily and cached, and a failed resolution is
+        // retried on a timer rather than every frame (FindClassByName walks all of
+        // GObjects).
+        // -------------------------------------------------------------------
+        auto skeletalMeshClass = []() -> uintptr_t {
+            static uintptr_t s_cls = 0;
+            static ULONGLONG s_retry = 0;
+            if (s_cls) return s_cls;
+
+            const ULONGLONG now = GetTickCount64();
+            if (s_retry != 0 && now - s_retry < 3000) return 0;
+            s_retry = now;
+
+            // The engine base class. Every game-specific mesh component derives from
+            // it, so this one lookup covers all of them.
+            s_cls = ue::FindClassByName(SBOX("SkeletalMeshComponent", 0xC0));
+            if (s_cls) {
+                LOG(SBOX("[bones] SkeletalMeshComponent UClass = 0x%llX", 0xC1),
+                    (unsigned long long)s_cls);
+            }
+            return s_cls;
+        };
+
+        auto isSkeletalMesh = [&skeletalMeshClass](uintptr_t m) -> bool {
+            if (!ue::PtrOk(m)) return false;
+            const uintptr_t target = skeletalMeshClass();
+            if (!target) return false;                 // not resolved yet: reject, retry later
+            return ue::IsA(m, target);
+        };
+
+        // -------------------------------------------------------------------
+        // ONE-SHOT DIAGNOSTIC: WHAT IS ACTUALLY AT THE DECLARED OFFSETS?
+        //
+        // The class-name check rejected every candidate on the first run, which
+        // means the guess about the naming convention was wrong -- not that the
+        // offsets are wrong. Printing the real names is the only way to tell the
+        // two apart, so this runs once per process and names every candidate
+        // regardless of whether it passes the test.
+        // -------------------------------------------------------------------
+        {
+            static int s_dumped = 0;
+            if (s_dumped++ < 3) {
+                const uint32_t probe[] = { off::WF_MeshFor3PP, off::ACh_Mesh, off::WF_PaperMan2DMesh };
+                for (uint32_t po : probe) {
+                    const uintptr_t c = ue::R64(character + po);
+                    char line[192];
+                    if (!ue::PtrOk(c)) {
+                        _snprintf_s(line, sizeof(line), _TRUNCATE,
+                                    "[bones] char+0x%X -> null/invalid", po);
+                    } else {
+                        std::string cn;
+                        const uintptr_t cls = ue::R64(c + off::UObj_Class);
+                        const bool named = ue::PtrOk(cls) && ue::NameOf(cls, cn);
+                        _snprintf_s(line, sizeof(line), _TRUNCATE,
+                                    "[bones] char+0x%X -> cls=0x%llX name='%s'",
+                                    po, (unsigned long long)cls,
+                                    named ? cn.c_str() : "<naming failed>");
+                    }
+                    LOG(SBOX("%s", 0xB7), line);
+                }
+            }
+        }
+
+        // preferred offsets first, validated
         const uint32_t preferred[] = { off::WF_MeshFor3PP, off::ACh_Mesh, off::WF_PaperMan2DMesh };
         uintptr_t d = 0; int32_t n = 0;
         for (uint32_t o : preferred) {
-            if (boneArrayOk(ue::R64(character + o), d, n)) { mesh = ue::R64(character + o); break; }
+            const uintptr_t cand = ue::R64(character + o);
+            if (isSkeletalMesh(cand) && boneArrayOk(cand, d, n)) {
+                mesh = cand;
+                static int s_p1 = 0;
+                if (s_p1++ < 4) {
+                    std::string cn;
+                    const uintptr_t cls = ue::R64(cand + off::UObj_Class);
+                    if (ue::PtrOk(cls)) ue::NameOf(cls, cn);
+                    LOG(SBOX("[bones] declared field char+0x%X: %d bones, class='%s'", 0xB6),
+                        o, n, cn.c_str());
+                }
+                break;
+            }
         }
         if (!mesh) {
             // -------------------------------------------------------------------
-            // Pick the component with the MOST bones, not the FIRST one found.
+            // Bounded scan, but ONLY over pointers that pass the class test.
             //
-            // A character carries several skeletal meshes: body, weapon,
-            // cosmetics, attachments. Taking the first hit grabbed a 30-bone
-            // weapon mesh (or a 1-bone attachment) whose world extent is nothing
-            // like a humanoid, so the height sanity check then rejected it and the
-            // probe logged "no bones" while the real body mesh sat right there.
+            // Without that test this loop is exactly what produced the 308-bone
+            // data asset, so the test is the load-bearing part, not the range.
             //
-            // The body skeleton is by far the largest (60-90 bones here), so
-            // preferring the maximum is robust and needs no magic bone count.
+            // Among valid components, prefer a HUMAN-SIZED rig: the body skeleton
+            // here is 60-90 bones, while the merged mesh that carries weapon and
+            // cosmetics is larger and has a different ComponentToWorld, which is
+            // what made the drawn skeleton sit offset from the model.
             // -------------------------------------------------------------------
             uintptr_t bestMesh = 0, bestData = 0;
             int32_t   bestNum = 0;
+            int32_t   bestScore = -1;
             uint32_t  bestOff = 0;
             for (uint32_t o = 0; o < 0x2000; o += 8) {
-                uintptr_t m = ue::R64(character + o);
+                const uintptr_t m = ue::R64(character + o);
+                if (!isSkeletalMesh(m)) continue;
                 uintptr_t dd = 0; int32_t nn = 0;
-                if (boneArrayOk(m, dd, nn) && nn > bestNum) {
+                if (!boneArrayOk(m, dd, nn)) continue;
+
+                // 50..200 bones scores by count (bigger humanoid wins);
+                // anything outside that range is penalised so a merged mesh or a
+                // prop cannot outrank a real body.
+                const int32_t score = (nn >= 50 && nn <= 200) ? nn : (1000 - nn);
+                if (score > bestScore) {
+                    bestScore = score;
                     bestMesh = m; bestData = dd; bestNum = nn; bestOff = o;
                 }
             }
             if (bestMesh) {
                 mesh = bestMesh; d = bestData; n = bestNum;
                 static int s_logged = 0;
-                if (s_logged++ < 4)
-                    LOG(SBOX("[bones] body mesh at char+0x%X with %d bones", 0xB5), bestOff, bestNum);
+                if (s_logged++ < 6) {
+                    // Log the CLASS NAME, not just the offset. The offset alone was
+                    // what hid the bug for two rounds: 0x118 with 308 bones looked
+                    // like a perfectly good body mesh until the dump showed it was
+                    // an EntranceEffectsDataAsset. A name makes that impossible to
+                    // miss.
+                    std::string cn;
+                    const uintptr_t cls = ue::R64(bestMesh + off::UObj_Class);
+                    if (ue::PtrOk(cls)) ue::NameOf(cls, cn);
+                    LOG(SBOX("[bones] picked char+0x%X: %d bones, class='%s'", 0xB5),
+                        bestOff, bestNum, cn.c_str());
+                }
             }
         }
     }
@@ -431,6 +559,7 @@ static bool GetImpl(uintptr_t character, BoneSet& out) {
         }
     }
 
+    out.mesh = mesh;
     out.valid = true;
     return true;
 }

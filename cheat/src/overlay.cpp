@@ -17,6 +17,7 @@
 #include "aim.h"
 #include "skill.h"
 #include "input.h"
+#include "webui_bridge.h"
 #include "ue.h"
 #include "log.h"
 #include "obf.h"
@@ -1037,6 +1038,10 @@ DWORD WINAPI ThreadProc(LPVOID) {
         // with it the menu key and the X1/X2 binding. The call is cheap (one
         // pointer compare) and only does work when the handle actually changed.
         InstallGameWndProcHook(s_gameHwnd);
+
+        // Publish settings/status to the out-of-process UI, and apply its edits.
+        // Two memcpys per frame; no I/O, no sockets.
+        webui_bridge::Tick();
 
         input::Tick();
 

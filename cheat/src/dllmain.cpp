@@ -33,6 +33,7 @@
 #include "ue.h"
 #include "gui.h"
 #include "input.h"
+#include "webui_bridge.h"
 #include "gfxprobe.h"
 #include "overlay.h"
 #include "canvas.h"
@@ -143,6 +144,17 @@ static DWORD WINAPI BootThread(LPVOID param) {
 
         // start the independent input paths (RegisterHotKey thread etc.)
     input::Init();
+
+    // ---- 6. out-of-process parameter UI bridge ----
+    //
+    // Creates a named shared-memory block and mirrors the settings into it. The
+    // browser UI runs in a SEPARATE process and owns all network traffic; this
+    // process performs no socket calls at all. See webui_shm.h for the reasoning
+    // and for what the UI can and cannot see.
+    //
+    // Failure is not fatal: if the block cannot be created the game runs exactly
+    // as before, just without the external panel.
+    webui_bridge::Init();
 
     LOG(SBOX("[boot] ready -- INSERT toggles the menu", 0x63));
     return 0;

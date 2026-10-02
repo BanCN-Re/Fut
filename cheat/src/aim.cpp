@@ -1,4 +1,4 @@
-// D:\Work\Fut\cheat\src\aim.cpp
+﻿// D:\Work\Fut\cheat\src\aim.cpp
 //
 // Aim module: SOFT lock and HARD lock, independently switchable, each with its
 // own runtime-bound trigger key.
@@ -42,6 +42,7 @@
 #include "log.h"
 #include "gui.h"
 #include "keybind.h"
+#include "visibility.h"
 #include "themida.h"
 
 #include "imgui.h"
@@ -61,6 +62,7 @@ static float s_lastFov = 0.0f;
 static char  s_err[128] = {0};
 static Mode  s_mode = Mode::Off;
 static bool  s_hardHolding = false;
+static const char* s_lastReject = "";   // why the last candidate was skipped
 
 int         TargetCount() { return s_targets; }
 const char* LastError()   { return s_err; }
@@ -368,43 +370,79 @@ void Tick() {
         if (e.hpMax > 0.0f && e.hp <= 0.0f) continue;             // dead
         if (g_settings.teamCheck && e.team == myTeam) continue;   // teammate
 
-        // ---- aim point, with height fallback and lead -----------------------
+        // ---- aim point ------------------------------------------------------
+        //
+        // The BODY CENTRE is the anchor, not the head, and the height is taken as
+        // a fraction from the skeleton. See the note on head jitter below.
         float ax, ay, az;
         if (e.bonesOk) {
-            const bool headWanted = g_settings.boneHead;
             ax = e.chestX;
             ay = e.chestY;
-            az = headWanted ? e.headZ : e.chestZ;
+            // Height: head for a controlled shot, chest while the target is moving
+            // fast. This is a POLICY choice applied after the speed measurement
+            // below, so the initial value here is the standing-still choice.
+            az = g_settings.boneHead ? e.headZ : e.chestZ;
         } else {
             ax = e.x; ay = e.y; az = e.z + 60.0f;
         }
 
-        // Measure speed against the previous sample BEFORE overwriting it.
+        // ---- speed and jitter suppression -----------------------------------
+        //
+        // Reported: "aim locks a moving target and the crosshair jumps around".
+        //
+        // Two separate causes, both fixed here:
+        //
+        //  a) THE HEAD BONE IS NOISY. It is the leaf of the longest bone chain, so
+        //     every animation, aim offset, flinch and IK correction accumulates
+        //     there. Measured on this title the head moves several times more per
+        //     frame than the chest. Feeding it straight into atan2 makes the
+        //     written angle jitter even when the character walks in a straight
+        //     line.
+        //
+        //  b) RAW VELOCITY IS NOISY TOO. (pos - prevPos)/dt over one frame
+        //     amplifies exactly that jitter, and the lead term then multiplies it.
+        //
+        // So the position used for aiming is SMOOTHED over a short window before
+        // anything else touches it, and the velocity is derived from the smoothed
+        // value rather than the raw one.
         Track* tr = FindTrack(e.addr);
-        const float speed = TrackSpeed(tr, ax, ay, az);
+        float speed = 0.0f;
+        if (tr) {
+            speed = TrackSpeed(tr, ax, ay, az);
+            // Exponential smoothing. 0.35 keeps up with a strafing target (the lag
+            // is about two frames) while removing single-frame bone spikes.
+            const float a = 0.35f;
+            tr->x += (ax - tr->x) * a;
+            tr->y += (ay - tr->y) * a;
+            tr->z += (az - tr->z) * a;
+            ax = tr->x; ay = tr->y; az = tr->z;
+        }
 
-        // Fast target -> chest. The head bone is the noisiest joint and on a
-        // flying/dashing character it swings far more per frame than the chest.
+        // Fast target -> chest. Applied AFTER smoothing so the decision is made on
+        // a stable speed, and it re-anchors the height to the chest bone directly
+        // rather than trusting the smoothed head value.
         if (e.bonesOk && g_settings.preferChestWhenMoving &&
             speed > g_settings.movingThreshold) {
             az = e.chestZ;
         }
 
-        // Lead the target by the expected time-to-arrival, using its measured
-        // velocity. Without this the view arrives where the target WAS (note 3).
+        // Lead the target. Bounded, because an unbounded lead on a noisy velocity
+        // is what produces a crosshair that overshoots and snaps back.
         if (tr && speed > 1.0f) {
             const ULONGLONG now = GetTickCount64();
             const float dt = (float)(now - tr->t) / 1000.0f;
             if (dt > 0.0f && dt < 0.25f) {
-                // Assume roughly 120 ms to converge; the smoothing ramp determines
-                // most of this but the correction is bounded either way.
                 const float lead = 0.12f;
-                const float vx = (ax - tr->x) / dt;
-                const float vy = (ay - tr->y) / dt;
-                const float vz = (az - tr->z) / dt;
-                ax += vx * lead;
-                ay += vy * lead;
-                az += vz * lead;
+                float vx = (ax - tr->x) / dt * lead;
+                float vy = (ay - tr->y) / dt * lead;
+                float vz = (az - tr->z) / dt * lead;
+                // clamp the correction to one body height: beyond that the velocity
+                // sample is wrong (teleport, respawn, spectate switch), not fast
+                const float kMaxLead = 150.0f;
+                vx = (vx > kMaxLead) ? kMaxLead : (vx < -kMaxLead ? -kMaxLead : vx);
+                vy = (vy > kMaxLead) ? kMaxLead : (vy < -kMaxLead ? -kMaxLead : vy);
+                vz = (vz > kMaxLead) ? kMaxLead : (vz < -kMaxLead ? -kMaxLead : vz);
+                ax += vx; ay += vy; az += vz;
             }
         }
 
@@ -424,11 +462,55 @@ void Tick() {
             if (g_settings.fovLimit && d > fovPx) continue;
         }
 
-        // ---- score ----------------------------------------------------------
+        // ---- world distance -------------------------------------------------
         const float ddx = ax - from.x, ddy = ay - from.y, ddz = az - from.z;
         const float worldDist = sqrtf(ddx * ddx + ddy * ddy + ddz * ddz);
-        if (worldDist < 30.0f) continue;             // our own capsule
-        const float score = (cam.valid ? d : 0.0f) + worldDist * 0.002f;
+        if (worldDist < 30.0f) continue;                      // our own capsule
+        if (worldDist > g_settings.maxDist) continue;         // out of range
+
+        // ---- visibility filters ---------------------------------------------
+        //
+        // Run LAST because they are the expensive tests (the line trace especially,
+        // even with its cache). Everything above is memory reads; these enter the
+        // engine's collision query or scan the object list.
+        visibility::Policy vp;
+        vp.requireLos   = g_settings.avoidWalls;
+        vp.avoidSmoke   = g_settings.avoidSmoke;
+        vp.avoidStealth = g_settings.avoidStealth;
+        if (g_settings.avoidWalls || g_settings.avoidSmoke || g_settings.avoidStealth) {
+            if (!visibility::Passes(e.addr, vp,
+                                    from.x, from.y, from.z,
+                                    ax, ay, az)) {
+                s_lastReject = visibility::LastRejectReason();
+                continue;
+            }
+        }
+
+        // ---- score, per the selected priority --------------------------------
+        float score = 0.0f;
+        switch (g_settings.priority) {
+        case Settings::Priority::Distance:
+            score = worldDist;
+            break;
+        case Settings::Priority::Threat: {
+            // Lowest HP first, then nearest. Health is a percentage so a nearly
+            // dead target at range still outranks a full-health one up close.
+            float hpFrac = 1.0f;
+            if (e.hpMax > 0.0f) {
+                hpFrac = e.hp / e.hpMax;
+                if (hpFrac < 0.0f) hpFrac = 0.0f;
+                if (hpFrac > 1.0f) hpFrac = 1.0f;
+            }
+            score = hpFrac * 10000.0f + worldDist * 0.01f;
+            break;
+        }
+        case Settings::Priority::Crosshair:
+        default:
+            // screen distance dominates; a small world-space term breaks ties
+            // toward the nearer target, which is the easier shot
+            score = (cam.valid ? d : 0.0f) + worldDist * 0.002f;
+            break;
+        }
 
         // stickiness: keep the current target unless clearly beaten
         if (e.addr == s_stickyAddr && score <= bestScore * (1.0f / kSwitchMargin)) {

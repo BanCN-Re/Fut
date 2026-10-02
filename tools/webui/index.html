@@ -1,0 +1,300 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>FUT 参数面板</title>
+<!--
+  Out-of-process parameter panel.
+
+  Sliders POST on every `input` event (not on release), so the game picks the new
+  value up on its next frame. Polling /api/get twice a second drives the read-only
+  status readout.
+
+  The token is read from the page URL and echoed on every request.
+-->
+<style>
+  :root{
+    --bg:#0b0d12; --panel:#141821; --panel2:#1b2130; --line:#28303f;
+    --fg:#d8dee9; --dim:#7c8798; --accent:#3b82f6; --accent2:#2563eb;
+    --ok:#22c55e; --warn:#f59e0b; --bad:#ef4444;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; background:var(--bg); color:var(--fg);
+    font:13px/1.5 "Segoe UI","Microsoft YaHei",system-ui,sans-serif;
+  }
+  header{
+    position:sticky; top:0; z-index:10; padding:10px 16px;
+    background:rgba(11,13,18,.92); backdrop-filter:blur(8px);
+    border-bottom:1px solid var(--line); display:flex; align-items:center; gap:16px;
+  }
+  header h1{font-size:14px; margin:0; font-weight:600; letter-spacing:.5px}
+  .status{display:flex; gap:14px; font-size:12px; color:var(--dim); flex-wrap:wrap}
+  .status b{color:var(--fg); font-weight:600}
+  .dot{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:5px}
+  .dot.on{background:var(--ok)} .dot.off{background:#4b5563}
+  .dot.hard{background:var(--bad)}
+  main{display:grid; grid-template-columns:repeat(auto-fit,minmax(330px,1fr)); gap:14px; padding:14px}
+  section{background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:12px 14px}
+  section h2{
+    font-size:12px; margin:0 0 10px; padding-bottom:8px; color:var(--accent);
+    border-bottom:1px solid var(--line); font-weight:600; letter-spacing:.4px;
+  }
+  .row{display:flex; align-items:center; gap:10px; margin:7px 0}
+  .row label{flex:1; color:var(--fg); font-size:12.5px}
+  .row .val{width:62px; text-align:right; color:var(--dim); font-variant-numeric:tabular-nums; font-size:12px}
+  input[type=range]{flex:0 0 130px; accent-color:var(--accent); height:18px}
+  input[type=checkbox]{width:16px;height:16px; accent-color:var(--accent); cursor:pointer}
+  .keybtn{
+    background:var(--panel2); border:1px solid var(--line); color:var(--fg);
+    border-radius:6px; padding:3px 10px; font-size:12px; cursor:pointer; min-width:120px;
+  }
+  .keybtn:hover{border-color:var(--accent)}
+  .keybtn.cap{background:#7c2d12; border-color:#ea580c; color:#fed7aa}
+  .hint{color:var(--dim); font-size:11.5px; margin-top:8px; line-height:1.45}
+  .warn{color:var(--warn); font-size:11.5px; margin-top:6px}
+  code{background:var(--panel2); padding:1px 5px; border-radius:4px; font-size:11.5px}
+</style>
+</head>
+<body>
+<header>
+  <h1>FUT 参数面板</h1>
+  <div class="status">
+    <span><span id="dCam" class="dot off"></span>相机 <b id="sCam">-</b></span>
+    <span><span id="dMode" class="dot off"></span>锁定 <b id="sMode">空闲</b></span>
+    <span>目标 <b id="sTgt">0</b></span>
+    <span>对象 <b id="sObj">0</b></span>
+    <span id="sErr" style="color:var(--warn)"></span>
+  </div>
+</header>
+
+<main>
+  <section>
+    <h2>ESP 透视</h2>
+    <div class="row"><label>启用 ESP</label><input type="checkbox" data-k="espEnabled"></div>
+    <div class="row"><label>方框</label><input type="checkbox" data-k="espBox"></div>
+    <div class="row"><label>角框样式</label><input type="checkbox" data-k="espCornerBox"></div>
+    <div class="row"><label>骨骼骨架</label><input type="checkbox" data-k="espBones"></div>
+    <div class="row"><label>名字</label><input type="checkbox" data-k="espName"></div>
+    <div class="row"><label>距离</label><input type="checkbox" data-k="espDistance"></div>
+    <div class="row"><label>血量条</label><input type="checkbox" data-k="espHealth"></div>
+    <div class="row"><label>连线</label><input type="checkbox" data-k="espSnapline"></div>
+    <div class="row"><label>队伍着色</label><input type="checkbox" data-k="espTeamColor"></div>
+    <div class="row"><label>最远距离 (uu)</label>
+      <input type="range" data-k="espMaxDist" min="500" max="50000" step="500"><span class="val"></span></div>
+    <div class="row"><label>不透明度</label>
+      <input type="range" data-k="boxAlpha" min="0.1" max="1" step="0.05"><span class="val"></span></div>
+  </section>
+
+  <section>
+    <h2>游戏原生系统</h2>
+    <div class="row"><label>反隐身</label><input type="checkbox" data-k="antiStealth"></div>
+    <div class="row"><label>描边透视</label><input type="checkbox" data-k="outline"></div>
+    <div class="row"><label>雷达 / 地图</label><input type="checkbox" data-k="radarEnable"></div>
+    <div class="row"><label>雷达范围 (uu)</label>
+      <input type="range" data-k="radarRange" min="500" max="10000" step="100"><span class="val"></span></div>
+    <div class="row"><label>雷达边长 (px)</label>
+      <input type="range" data-k="radarSize" min="100" max="400" step="10"><span class="val"></span></div>
+    <div class="row"><label>雷达 X</label>
+      <input type="range" data-k="radarX" min="-800" max="800" step="10"><span class="val"></span></div>
+    <div class="row"><label>雷达 Y</label>
+      <input type="range" data-k="radarY" min="-800" max="800" step="10"><span class="val"></span></div>
+    <div class="hint">雷达坐标负值表示从右/下边缘起算。</div>
+  </section>
+
+  <section>
+    <h2>Aim · 软锁 Soft</h2>
+    <div class="row"><label>启用总开关</label><input type="checkbox" data-k="aimEnabled"></div>
+    <div class="row"><label>启用软锁</label><input type="checkbox" data-k="softEnable"></div>
+    <div class="row"><label>软锁触发键</label><button class="keybtn" id="kSoft">-</button></div>
+    <div class="row"><label>按住生效（关=切换）</label><input type="checkbox" data-k="softHold"></div>
+    <div class="row"><label>平滑（越大越慢）</label>
+      <input type="range" data-k="aimSmooth" min="1" max="30" step="0.5"><span class="val"></span></div>
+  </section>
+
+  <section>
+    <h2>Aim · 硬锁 Hard</h2>
+    <div class="row"><label>启用硬锁</label><input type="checkbox" data-k="hardEnable"></div>
+    <div class="row"><label>硬锁触发键</label><button class="keybtn" id="kHard">-</button></div>
+    <div class="row"><label>按住生效（关=切换）</label><input type="checkbox" data-k="hardHold"></div>
+    <div class="row"><label>松开后保持 (ms)</label>
+      <input type="range" data-k="hardHoldMs" min="0" max="500" step="10"><span class="val"></span></div>
+    <div class="hint">硬锁每帧写入精确角度；保持时间用于甩枪后立刻松开仍命中。</div>
+  </section>
+
+  <section>
+    <h2>目标选择</h2>
+    <div class="row"><label>队友过滤</label><input type="checkbox" data-k="teamCheck"></div>
+    <div class="row"><label>瞄准头部</label><input type="checkbox" data-k="boneHead"></div>
+    <div class="row"><label>快速移动改瞄胸部</label><input type="checkbox" data-k="preferChestWhenMoving"></div>
+    <div class="row"><label>快速阈值 (uu/s)</label>
+      <input type="range" data-k="movingThreshold" min="50" max="1500" step="25"><span class="val"></span></div>
+    <div class="row"><label>FOV 角度</label>
+      <input type="range" data-k="aimFov" min="5" max="180" step="1"><span class="val"></span></div>
+    <div class="hint">头骨是全身最抖的关节，飘飞/冲刺时改瞄胸部更稳。</div>
+  </section>
+
+  <section>
+    <h2>拟人抖动</h2>
+    <div class="row"><label>启用抖动</label><input type="checkbox" data-k="jitter"></div>
+    <div class="row"><label>幅度 (度)</label>
+      <input type="range" data-k="jitterDeg" min="0.05" max="3" step="0.05"><span class="val"></span></div>
+    <div class="row"><label>频率 (Hz)</label>
+      <input type="range" data-k="jitterHz" min="1" max="30" step="1"><span class="val"></span></div>
+  </section>
+</main>
+
+<script>
+const TOKEN = new URLSearchParams(location.search).get('t') || '';
+const api = (p) => p + '?t=' + encodeURIComponent(TOKEN);
+
+const KEYNAMES = {
+  0:'无', 1:'鼠标左键', 2:'鼠标右键', 4:'鼠标中键',
+  256:'鼠标侧键 X1', 257:'鼠标侧键 X2',
+  16:'Shift', 17:'Ctrl', 18:'Alt', 32:'空格', 9:'Tab', 45:'Insert', 46:'Delete',
+  36:'Home', 35:'End', 33:'PageUp', 34:'PageDown',
+  37:'方向键 左', 38:'方向键 上', 39:'方向键 右', 40:'方向键 下'
+};
+function keyName(v){
+  if (KEYNAMES[v] !== undefined) return KEYNAMES[v];
+  if (v >= 112 && v <= 135) return 'F' + (v - 111);
+  if (v >= 48 && v <= 57)  return String.fromCharCode(v);
+  if (v >= 65 && v <= 90)  return String.fromCharCode(v);
+  if (v >= 96 && v <= 105) return '小键盘 ' + (v - 96);
+  return '按键 0x' + v.toString(16).toUpperCase();
+}
+
+// ---------------------------------------------------------------------------
+// apply a server snapshot into the controls
+// ---------------------------------------------------------------------------
+let applying = false;      // guards against echoing our own writes back
+let softKeyVal = 0, hardKeyVal = 0;
+
+function applyState(s){
+  applying = true;
+  document.querySelectorAll('[data-k]').forEach(el => {
+    const k = el.dataset.k;
+    if (s[k] === undefined) return;
+    if (el.type === 'checkbox') {
+      el.checked = !!s[k];
+    } else {
+      el.value = s[k];
+      const v = el.parentElement.querySelector('.val');
+      if (v) v.textContent = s[k];
+    }
+  });
+  softKeyVal = s.softKey ?? 0;
+  hardKeyVal = s.hardKey ?? 0;
+  document.getElementById('kSoft').textContent = keyName(softKeyVal);
+  document.getElementById('kHard').textContent = keyName(hardKeyVal);
+
+  // status
+  const cam = !!s.cameraOk;
+  document.getElementById('dCam').className = 'dot ' + (cam ? 'on' : 'off');
+  document.getElementById('sCam').textContent = cam
+    ? `${(s.camFov||0).toFixed(0)}°` : '无';
+
+  const mode = s.activeMode | 0;
+  const locked = !!s.hardLocked;
+  const dm = document.getElementById('dMode');
+  dm.className = 'dot ' + (locked ? 'hard' : (mode ? 'on' : 'off'));
+  document.getElementById('sMode').textContent =
+    locked ? '硬锁中' : mode === 2 ? '硬锁' : mode === 1 ? '软锁' : '空闲';
+
+  document.getElementById('sTgt').textContent = s.targets ?? 0;
+  document.getElementById('sObj').textContent = s.objects ?? 0;
+  document.getElementById('sErr').textContent = (s.lastError || '').trim();
+  applying = false;
+}
+
+// ---------------------------------------------------------------------------
+// send
+// ---------------------------------------------------------------------------
+function send(k, v){
+  if (applying) return;
+  fetch(api('/api/set'), {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({[k]: v})
+  }).catch(()=>{});
+}
+
+document.querySelectorAll('input[type=checkbox][data-k]').forEach(el => {
+  el.addEventListener('change', () => send(el.dataset.k, el.checked ? 1 : 0));
+});
+
+document.querySelectorAll('input[type=range][data-k]').forEach(el => {
+  // `input` fires continuously while dragging: the value reaches the game on the
+  // next frame, which is what makes this feel live rather than "apply on release".
+  el.addEventListener('input', () => {
+    const v = parseFloat(el.value);
+    const out = el.parentElement.querySelector('.val');
+    if (out) out.textContent = el.value;
+    send(el.dataset.k, v);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// key capture
+//
+// The page cannot see the side buttons through the DOM in every browser, so the
+// buttons work for keyboard and the three standard mouse buttons; X1/X2 are
+// captured by the GAME's WndProc and land in the shared block, which the poll
+// below picks up.
+// ---------------------------------------------------------------------------
+let capturing = null;
+
+function startCapture(which){
+  capturing = which;
+  const btn = document.getElementById(which === 'soft' ? 'kSoft' : 'kHard');
+  btn.classList.add('cap');
+  btn.textContent = '请按键... (ESC 取消)';
+  window.focus();
+}
+
+function stopCapture(){
+  capturing = null;
+  const b1 = document.getElementById('kSoft'), b2 = document.getElementById('kHard');
+  b1.classList.remove('cap'); b2.classList.remove('cap');
+  b1.textContent = keyName(softKeyVal); b2.textContent = keyName(hardKeyVal);
+}
+
+document.getElementById('kSoft').onclick = () => capturing === 'soft' ? stopCapture() : startCapture('soft');
+document.getElementById('kHard').onclick = () => capturing === 'hard' ? stopCapture() : startCapture('hard');
+
+window.addEventListener('keydown', e => {
+  if (!capturing) return;
+  e.preventDefault();
+  if (e.key === 'Escape') { stopCapture(); return; }
+  // e.keyCode is the VK code: exactly what the block stores.
+  send(capturing === 'soft' ? 'softKey' : 'hardKey', e.keyCode);
+  if (capturing === 'soft') softKeyVal = e.keyCode; else hardKeyVal = e.keyCode;
+  stopCapture();
+}, true);
+
+// mouse buttons 0/1/2 -> VK 1/2/4
+window.addEventListener('mousedown', e => {
+  if (!capturing) return;
+  e.preventDefault();
+  const map = {0:1, 1:4, 2:2};     // DOM 0=left 1=middle 2=right
+  const vk = map[e.button];
+  if (vk === undefined) return;
+  send(capturing === 'soft' ? 'softKey' : 'hardKey', vk);
+  if (capturing === 'soft') softKeyVal = vk; else hardKeyVal = vk;
+  stopCapture();
+}, true);
+
+// ---------------------------------------------------------------------------
+// poll
+// ---------------------------------------------------------------------------
+async function poll(){
+  try {
+    const r = await fetch(api('/api/get'), {cache:'no-store'});
+    if (r.ok) applyState(await r.json());
+  } catch(e){}
+  setTimeout(poll, 500);
+}
+poll();
+</script>
+</body>
+</html>

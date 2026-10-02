@@ -1,4 +1,4 @@
-// D:\Work\Fut\cheat\src\features.cpp
+﻿// D:\Work\Fut\cheat\src\features.cpp
 // ESP / aim / radar / recoil, ported from the overseas Flavia build.
 // See features.h for the module-by-module mapping.
 #include "features.h"
@@ -648,49 +648,25 @@ void DrawSkeletonFor(void* canvasObj, uintptr_t actor) {
     if (!sdk::Ready()) return;
 
     // -----------------------------------------------------------------------
-    // BODY MESH -- AUTHORITATIVE FIELD, NOT A BONE-COUNT HEURISTIC.
+    // BODY MESH -- TAKEN FROM bones::Get, NOT RE-DERIVED HERE.
     //
-    // The old version scanned the actor for the component with the MOST bones.
-    // That reliably picked the MERGED mesh (246 bones), which has the weapon and
-    // every attachment skinned alongside the body. Two consequences, both
-    // reported by the user:
+    // This function used to run its own component search with its own heuristic
+    // (different scan range, different acceptance test) while the ESP box used
+    // bones::Get. Two searches over the same actor can disagree, and they did:
+    // both were fooled by data-asset pointers into reporting 300+ "bones", and
+    // because they were fooled INDEPENDENTLY the box and the skeleton ended up
+    // describing different memory. That is the root of "the skeleton does not line
+    // up with the box" and of the skeleton pointing somewhere else when the
+    // character turns.
     //
-    //   * joint COUNT was wrong (246 vs the body's ~85-112)
-    //   * joint POSITIONS were wrong, because that component's ComponentToWorld is
-    //     not the frame the body bones are expressed in, so the whole figure came
-    //     out offset -- "skeleton position is wrong"
-    //
-    // AWFBaseCharacter declares the real 3rd-person body mesh explicitly:
-    //     UWFBaseSkeletalMeshComponent* MeshFor3PP @ 0x0EC0
-    // Use it. The scan survives only as a fallback, and now PREFERS a human-sized
-    // skeleton (50..200 bones) rather than the largest, so a merged mesh cannot win.
+    // bones::Get now validates the component by class name, chooses the body rig,
+    // computes the world anchors and publishes the component it used. Asking it for
+    // the mesh is one cached call and guarantees the skeleton is drawn from exactly
+    // the component the box was measured from.
     // -----------------------------------------------------------------------
-    uintptr_t mesh = 0;
-    {
-        auto boneCount = [](uintptr_t m) -> int32_t {
-            if (!ue::PtrOk(m)) return -1;
-            uintptr_t d = ue::R64(m + off::Skinned_CachedComponentSpaceTransforms + off::TArray_Data);
-            int32_t   n = ue::RI32(m + off::Skinned_CachedComponentSpaceTransforms + off::TArray_Num);
-            if (n <= 0) n = ue::RI32(m + off::Skinned_CachedComponentSpaceTransforms + off::TArray_Max);
-            if (!ue::PtrOk(d) || n <= 0 || n > 512) return -1;
-            return n;
-        };
-
-        const uintptr_t cand3p = ue::R64(actor + off::WF_MeshFor3PP);
-        if (boneCount(cand3p) > 0) {
-            mesh = cand3p;
-        } else {
-            int32_t bestScore = -1;
-            for (uint32_t o = 0; o < 0x2000; o += 8) {
-                uintptr_t m = ue::R64(actor + o);
-                const int32_t n = boneCount(m);
-                if (n <= 0) continue;
-                const int32_t score = (n >= 50 && n <= 200) ? n : (1000 - n);
-                if (score > bestScore) { bestScore = score; mesh = m; }
-            }
-        }
-    }
-    if (!ue::PtrOk(mesh)) return;
+    bones::BoneSet bs;
+    if (!bones::Get(actor, bs) || !bs.valid || !ue::PtrOk(bs.mesh)) return;
+    const uintptr_t mesh = bs.mesh;
     static skeleton::Rig s_rigs[8];
     static uintptr_t     s_rigMesh[8] = {0};
     static int           s_rigCount = 0;

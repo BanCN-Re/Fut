@@ -188,6 +188,9 @@ constexpr uint32_t Fn_IsAlive       = 0x2378630;
 //       -> read-back, used to verify the toggle took effect.
 // ---------------------------------------------------------------------------
 constexpr uint32_t Fn_GetStealthActors                   = 0x2356E60;
+// UKismetSystemLibrary::LineTraceSingle -- line-of-sight test for aim filtering.
+// Taken from FunctionsInfo.json; the parameter struct is in visibility.cpp.
+constexpr uint32_t Fn_LineTraceSingle                    = 0x44794F0;
 constexpr uint32_t Fn_SetRenderOutlineMaterialEnabled    = 0x25D67B0;
 constexpr uint32_t Fn_GetRenderOutlineMaterialEnabled    = 0x44F46E0;
 

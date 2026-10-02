@@ -6,13 +6,24 @@ namespace bones {
 
 struct BoneSet {
     bool  valid = false;
+
+    // The mesh component these values were read from.
+    //
+    // EXPOSED SO EVERY CONSUMER USES THE SAME COMPONENT.
+    //
+    // The skeleton renderer used to pick its own mesh with its own heuristic while
+    // the box used this one. When the two disagreed -- and they did, both landing
+    // on data assets rather than meshes -- the box and the skeleton described
+    // different things and could not possibly line up. Publishing the choice makes
+    // that impossible: whoever draws reads from the component validated here.
+    uintptr_t mesh = 0;
+
     float headX = 0, headY = 0, headZ = 0;
     float chestX = 0, chestY = 0, chestZ = 0;
     float pelvisX = 0, pelvisY = 0, pelvisZ = 0;
     float feetX = 0, feetY = 0, feetZ = 0;
 
-    // Body vertical axis: the median X/Y of all bones, used to reject weapon and
-    // prop bones when picking the head and feet extremes. Exposed for diagnostics;
+    // Body vertical axis (the actor's own position). Exposed for diagnostics;
     // callers normally do not need it.
     float axisX = 0, axisY = 0;
 };

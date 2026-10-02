@@ -5,6 +5,7 @@
 #include "esp.h"
 #include "ue.h"
 #include "bones.h"
+#include "nametags.h"
 #include "canvas.h"
 #include "sdk.h"
 #include "features.h"
@@ -338,6 +339,26 @@ static void RefreshSlow(uintptr_t actor, Entity& e) {
     e.team = r->team;
     e.skin = r->skin; e.role = r->role;
     memcpy(e.name, r->name, sizeof(e.name));
+
+    // ------------------------------------------------------------------
+    // DISTANCE -- was declared on Entity and never written.
+    //
+    // The nametag needs it, and so does the box's own max-distance cull, but no
+    // code path ever assigned it: the field existed and stayed 0, which is why a
+    // distance readout would have shown "0.0 m" for every target. Computed here
+    // from the local pawn, in uu; the display layer converts to metres.
+    //
+    // The pawn is resolved once per frame inside LocalPawnHeld(), so this is a
+    // cached read rather than a fresh chain walk per entity.
+    // ------------------------------------------------------------------
+    {
+        ue::Vec3 self{};
+        const uintptr_t lp = LocalPawnHeld();
+        if (ue::PtrOk(lp) && ue::GetActorLocation(lp, self)) {
+            const float dx = e.x - self.x, dy = e.y - self.y, dz = e.z - self.z;
+            e.distance = sqrtf(dx * dx + dy * dy + dz * dz);
+        }
+    }
 
     // ------------------------------------------------------------------
     // HP PROBE -- reports the NEW path so the fix can be verified from the log
@@ -1128,32 +1149,55 @@ void DrawOneInGame(void* canvasObj, const Entity& e, const ue::Camera& cam,
         const float hg = frac > 0.5f ? 0.86f : (frac > 0.25f ? 0.78f : 0.23f);
         const float hb = frac > 0.5f ? 0.35f : (frac > 0.25f ? 0.23f : 0.23f);
         canvas::AddFillRect(bx, y1 - fh, 3.0f, fh, hr, hg, hb, 0.9f);
+
+        // -------------------------------------------------------------------
+        // ARMOUR BAR -- RIGHT SIDE, MIRRORING THE HEALTH BAR.
+        //
+        // THIS IS THE "WHITE BAR UNDER THE CHARACTER" THE USER ASKED ABOUT.
+        //
+        // It was not armour. The old code drew a white tick under the box whose
+        // WIDTH encoded distance:
+        //
+        //     AddFillRect(x0, y1 + 3, fminf(60, 8 + dist/200), 2, 0.9,0.9,0.9, 0.6)
+        //
+        // An unlabelled white bar that changes length with range reads as a stat
+        // bar, so it was reported as "the armour bar is wrong". It has been removed
+        // in favour of a labelled distance in the nametag (see nametags.cpp), and
+        // real armour now gets its own bar here:
+        //
+        //   * straight from UCyBaseAttributeSet::Armor / ArmorMax (0x98 / 0xA8)
+        //   * on the RIGHT of the box so it cannot be confused with health
+        //   * blue-white, distinct from the green/amber/red health ramp
+        //   * only drawn when the target actually has armour
+        //
+        // This title's armour is a real regenerating resource, so an enemy at full
+        // health behind full armour is a different proposition from one at full
+        // health with none -- worth its own bar rather than a text suffix.
+        // -------------------------------------------------------------------
+        if (e.armorMax > 0.0f) {
+            float af = e.armor / e.armorMax;
+            if (af < 0.0f) af = 0.0f;
+            if (af > 1.0f) af = 1.0f;
+            const float ax = x1 + 2.0f;
+            canvas::AddFillRect(ax, y0, 3.0f, boxH, 0.0f, 0.0f, 0.0f, 0.65f);
+            const float ah = boxH * af;
+            if (af > 0.0f)
+                canvas::AddFillRect(ax, y1 - ah, 3.0f, ah, 0.78f, 0.86f, 0.95f, 0.9f);
+        }
     }
 
-    // ---- distance text (drawn as a short tick; text needs a UFont) ----
-    if (g_settings.distance) {
-        const float w = fminf(60.0f, 8.0f + worldDist / 200.0f);
-        canvas::AddFillRect(x0, y1 + 3.0f, w, 2.0f, 0.9f, 0.9f, 0.9f, 0.6f);
-    }
-
-    // ---- NAME + HP TEXT ----
-    // Real text needs a UFont; features::gWorld.font is resolved in
-    // ScanWorld from the canvas's own font (it used to stay null, which is
-    // why names/HP text never appeared).
-    if (void* font = features::gWorld.font) {
-        if (g_settings.name && e.name[0]) {
-            char nm[40];
-            _snprintf_s(nm, sizeof(nm), _TRUNCATE, "%s", e.name);
-            features::draw::Text(canvasObj, font, nm, cx, y0 - 18.0f,
-                       sdk::LinearColor(r, g, b, 1.0f), true);
-        }
-        if (g_settings.health && e.hpMax > 0.0f) {
-            char hb[40];
-            _snprintf_s(hb, sizeof(hb), _TRUNCATE, "%.0f / %.0f", e.hp, e.hpMax);
-            features::draw::Text(canvasObj, font, hb, cx, y1 + 16.0f,
-                       sdk::LinearColor(0.9f, 0.9f, 0.9f, 0.9f), true);
-        }
-    }
+    // -----------------------------------------------------------------------
+    // NAME / DISTANCE / HP TEXT ARE NOW DRAWN BY THE NAMETAGS MODULE.
+    //
+    // They used to be emitted here as three unrelated pieces: a white tick under
+    // the box for distance, a bare name above it, and "hp / hpmax" below. The user
+    // asked for the reference client's presentation instead -- a single rounded
+    // panel carrying name, health, distance and a bar -- and for distance to be
+    // its own labelled element rather than an unlabelled tick.
+    //
+    // Keeping BOTH would double-draw the same information, so the old primitives
+    // are removed rather than left behind a switch. See nametags.cpp.
+    // -----------------------------------------------------------------------
 }
 
 } // namespace
@@ -1291,12 +1335,57 @@ void RenderInGame(void* canvasObj) {
     canvas::BeginFrame();
     int drawn = 0;
     int projected = 0;
+
+    // -----------------------------------------------------------------------
+    // NAMETAGS -- collected here, drawn after the boxes.
+    //
+    // The ESP already knows every entity's screen position, health, armour and
+    // distance, so the tag is built from that data rather than re-projecting.
+    // Re-projecting would double the cost and, worse, could disagree with the box
+    // about where the body is -- the exact class of bug that made the skeleton and
+    // the box drift apart.
+    //
+    // Drawn AFTER the boxes so a panel never covers a box outline.
+    // -----------------------------------------------------------------------
+    nametags::Begin();
+
     for (const Entity& e : ents) {
         if (ue::PtrOk(myPawn) && e.addr == myPawn) continue;   // never our own body
         DrawOneInGame(canvasObj, e, cam, localTeam, W, H);
         ++drawn;
+
+        // ---- queue the nametag -------------------------------------------
+        if (nametags::g_style.enabled && e.alive && e.name[0]) {
+            // Anchor above the head, at the reference's 0.35 body-height offset.
+            // headZ already carries the +16 uu the box uses, so the tag sits just
+            // clear of the box top.
+            float topZ = e.bonesOk ? (e.headZ + 16.0f) : (e.z + 90.0f);
+            const float bodyH = e.bonesOk ? (topZ - e.feetZ) : 180.0f;
+            const float tagZ  = topZ + bodyH * nametags::g_style.offsetAbove;
+
+            const float ax = e.bonesOk ? e.chestX : e.x;
+            const float ay = e.bonesOk ? e.chestY : e.y;
+
+            float sx, sy;
+            if (canvas::Project(canvasObj, ax, ay, tagZ, sx, sy)) {
+                nametags::Entry ne{};
+                ne.x = sx;
+                ne.y = sy;
+                ne.name = e.name;
+                ne.hp = e.hp;
+                ne.hpMax = e.hpMax;
+                ne.armor = e.armor;
+                ne.armorMax = e.armorMax;
+                ne.distance = e.distance / 100.0f;   // uu -> metres
+                ne.friendly = (e.team == localTeam);
+                nametags::Add(ne);
+            }
+        }
     }
     s_lastTargets = drawn;
+
+    // Nametags flush after the boxes, using the engine's own font.
+    nametags::Flush(canvasObj, features::gWorld.font);
 
     // =======================================================================
     // ADDITIVE FEATURES

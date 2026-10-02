@@ -1,4 +1,4 @@
-// D:\Work\Fut\cheat\src\aim.h
+﻿// D:\Work\Fut\cheat\src\aim.h
 #pragma once
 #include <cstdint>
 
@@ -60,6 +60,28 @@ struct Settings {
     // Hard lock extra: keep writing the locked angle for this long after the
     // trigger is released, so a flick-and-release stays on target.
     float hardHoldMs = 0.0f;             // 0 = stop immediately on release
+
+    // ---- visibility filters (each independently switchable) ----
+    //
+    // These exist because "aim locked a target I cannot shoot" is worse than not
+    // locking at all: the shot is wasted and the flick is visible. Each maps to one
+    // test in the visibility module.
+    bool  avoidWalls   = false;   // do not lock through geometry (real line trace)
+    bool  avoidSmoke   = false;   // do not lock into a smoke cloud
+    bool  avoidStealth = false;   // do not lock onto an invisible target
+
+    // ---- priority ----
+    //
+    // How to choose between several valid targets. Reported problem: aim kept
+    // picking a distant target over a close one because the score was dominated by
+    // screen distance from the crosshair.
+    enum class Priority {
+        Crosshair = 0,   // closest to the crosshair (classic, best for flicking)
+        Distance  = 1,   // nearest in world space (best for defending)
+        Threat    = 2,   // lowest HP first, then nearest
+    };
+    Priority priority = Priority::Crosshair;
+    float    maxDist  = 50000.0f; // uu; targets beyond this are ignored entirely
 
     // ---- humaniser ----
     bool  jitter     = false;

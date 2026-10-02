@@ -81,6 +81,10 @@
     <ClCompile Include="features.cpp" />
     <ClCompile Include="skeleton.cpp" />
     <ClCompile Include="keybind.cpp" />
+    <ClCompile Include="webui_shm.cpp" />
+    <ClCompile Include="webui_bridge.cpp" />
+    <ClCompile Include="visibility.cpp" />
+    <ClCompile Include="nametags.cpp" />
     <ClCompile Include="game_systems.cpp" />
     <ClCompile Include="aim.cpp" />
     <ClCompile Include="skill.cpp" />
@@ -120,6 +124,10 @@
     <ClInclude Include="features.h" />
     <ClInclude Include="skeleton.h" />
     <ClInclude Include="keybind.h" />
+    <ClInclude Include="webui_shm.h" />
+    <ClInclude Include="webui_bridge.h" />
+    <ClInclude Include="visibility.h" />
+    <ClInclude Include="nametags.h" />
     <ClInclude Include="game_systems.h" />
     <ClInclude Include="aim.h" />
     <ClInclude Include="skill.h" />
